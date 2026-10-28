@@ -28,7 +28,7 @@ impl Haptics {
         let device = host.output_devices().ok()?.find(is_dualsense)?;
         let config = cpal::StreamConfig {
             channels: 4,
-            sample_rate: cpal::SampleRate(RATE),
+            sample_rate: RATE,
             buffer_size: cpal::BufferSize::Default,
         };
         let queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -76,8 +76,8 @@ fn is_dualsense(device: &cpal::Device) -> bool {
         && device.supported_output_configs().is_ok_and(|mut configs| {
             configs.any(|c| {
                 c.channels() >= 4
-                    && c.min_sample_rate().0 <= RATE
-                    && c.max_sample_rate().0 >= RATE
+                    && c.min_sample_rate() <= RATE
+                    && c.max_sample_rate() >= RATE
                     && c.sample_format() == cpal::SampleFormat::F32
             })
         })

@@ -204,6 +204,9 @@ pub fn open_latest(dir: &Path) -> io::Result<Option<Latest>> {
     match lock.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Ok(None),
+        // Horizon's newlib has no advisory file locks. One process runs at a time there,
+        // so the guard against a second writer is unnecessary; keep the lock file open.
+        Err(fs::TryLockError::Error(_)) if cfg!(target_os = "horizon") => {}
         Err(fs::TryLockError::Error(e)) => return Err(e),
     }
     let mut file = OpenOptions::new()

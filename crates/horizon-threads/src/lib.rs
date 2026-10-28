@@ -199,28 +199,36 @@ pub fn catch_stop_signals() {}
 /// World generation, meshing and the tick allocate and free small blocks on
 /// every worker at once; the system heaps serialise them (Windows' heap was
 /// 16% of a chunk's generation time), mimalloc keeps a heap per thread.
+/// The Switch build has none: horizon-nx's allocator serves it.
+#[cfg(not(target_os = "horizon"))]
 pub use mimalloc::MiMalloc as Allocator;
 
 /// `mi_option_purge_delay` in mimalloc.h (index 15 in v2 and v3); the bindings
 /// don't name it.
+#[cfg(not(target_os = "horizon"))]
 const PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 /// Set the allocator up, first thing in `main`: free pages go back to the OS
 /// at once instead of a second later. With mimalloc's delay the game held a
 /// quarter more memory than with the system heap; without it a few percent,
 /// and generation keeps most of its speed-up.
+#[cfg(not(target_os = "horizon"))]
 pub fn configure_allocator() {
     // SAFETY: sets one integer option, which mimalloc reads at each purge.
     unsafe {
         libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
     }
 }
+/// horizon-nx's allocator, the Switch build's, has no option to set.
+#[cfg(target_os = "horizon")]
+pub fn configure_allocator() {}
 
 /// Give back to the OS the memory the allocator holds free, after something
 /// large was dropped: mimalloc's free pages, then the system heap's, which
 /// native libraries still use: glibc keeps freed pages in the arena of the
 /// thread that allocated them, and macOS in its zones until memory runs short.
 pub fn release_free_memory() {
+    #[cfg(not(target_os = "horizon"))]
     // SAFETY: frees only pages no allocation uses (this thread's heap, shared arenas).
     unsafe {
         libmimalloc_sys::mi_collect(true);

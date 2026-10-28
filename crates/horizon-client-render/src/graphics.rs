@@ -594,10 +594,16 @@ impl Graphics {
         // and render threads are raised above four cores, where vanilla
         // raises its server thread). Leaving two idled a core of a 4-thread
         // laptop while a world loaded: a teleport there took ~15% longer.
-        let auto = std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
-            .saturating_sub(1)
-            .max(1);
+        // std's `available_parallelism` has no Horizon arm (its cfg_select falls through to
+        // `Unsupported`), so the fallback would leave one worker on a three-core app. libnx
+        // gives applications cores 0-2; core 3 is reserved for the system (compat.rs's
+        // `sysconf` reports the same).
+        let cores = if cfg!(target_os = "horizon") {
+            3
+        } else {
+            std::thread::available_parallelism().map_or(2, |n| n.get())
+        };
+        let auto = cores.saturating_sub(1).max(1);
         if self.battery { auto.div_ceil(2) } else { auto }
     }
     /// The frame cap battery mode adds: 60 in a world, 30 in menus without a

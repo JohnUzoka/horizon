@@ -525,7 +525,7 @@ fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     config: &cpal::SupportedStreamConfig,
     mixer: Arc<Mutex<Mixer>>,
 ) -> Result<cpal::Stream> {
-    let rate = config.sample_rate().0;
+    let rate = config.sample_rate();
     let channels = config.channels() as usize;
     let mut scratch = Vec::new();
     let stream = device.build_output_stream(
@@ -659,7 +659,7 @@ impl Audio {
                         Ok((stream, config)) => {
                             log::info!(
                                 "Horizon: audio output {name} ({} Hz, {} channels, {})",
-                                config.sample_rate().0,
+                                config.sample_rate(),
                                 config.channels(),
                                 config.sample_format()
                             );
@@ -717,7 +717,7 @@ impl Audio {
                 Ok((stream, config)) => {
                     log::info!(
                         "Horizon: audio output {name} ({} Hz, {} channels, {})",
-                        config.sample_rate().0,
+                        config.sample_rate(),
                         config.channels(),
                         config.sample_format()
                     );

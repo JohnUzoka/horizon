@@ -1,6 +1,7 @@
 [workspace]
 exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal"]
 members = [
+    "crates/horizon-nx",
     "crates/horizon-core",
     "crates/horizon-dualsense",
     "crates/horizon-threads",

@@ -4,6 +4,8 @@ mod game;
 
 use horizon_client::{crash, logging};
 
+// The Switch build's allocator is horizon-nx's (its `allocator.rs`), which declares itself.
+#[cfg(not(target_os = "horizon"))]
 #[global_allocator]
 static ALLOCATOR: horizon_threads::Allocator = horizon_threads::Allocator;
 
@@ -13,6 +15,10 @@ static ALLOCATOR: horizon_threads::Allocator = horizon_threads::Allocator;
 static MOD_API_LEVEL: [u8; 27] = horizon_mods::api_level::MARK;
 
 fn main() {
+    // Switch: mount romfs, bring up BSD sockets, set the applet focus mode and open `log.txt`
+    // before anything allocates. Also what pulls the libnx lifecycle hooks into the link.
+    #[cfg(target_os = "horizon")]
+    horizon_nx::init();
     horizon_threads::configure_allocator();
     std::hint::black_box(&MOD_API_LEVEL);
     horizon_client::telemetry::mark_start();
@@ -25,6 +31,10 @@ fn main() {
     if let Some(dir) = game_args.clone().skip_while(|a| *a != "--home").nth(1) {
         logging::set_game_home(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
     }
+    // An NRO's home is its own folder, which horizon_nx::init made the working directory: its
+    // logs, crash reports and settings live there (the homebrew loader passes no arguments).
+    #[cfg(target_os = "horizon")]
+    logging::set_game_home(std::path::PathBuf::from("."));
     // The dedicated server logs in its own folder (--game-dir's), as vanilla's does; the game in its home.
     let (home, side, thread) = if args.iter().any(|a| a == "--dedicated") {
         let folder = game_args
@@ -75,7 +85,8 @@ fn main() {
 /// 1024 in a container). The same here; macOS caps it at `OPEN_MAX`, as the
 /// JVM does there.
 fn raise_open_file_limit() {
-    #[cfg(unix)]
+    // Horizon (the Switch) has no getrlimit/setrlimit: the port's rustix doesn't offer them.
+    #[cfg(all(unix, not(target_os = "horizon")))]
     {
         use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
         let limit = getrlimit(Resource::Nofile);

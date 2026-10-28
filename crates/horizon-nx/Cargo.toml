@@ -1,0 +1,24 @@
+[package]
+name = "horizon-nx"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.90"
+description = "Nintendo Switch (Horizon OS) runtime for the Horizon client: libnx lifecycle hooks, boot/exit logging, crash handler, heap reporting, and the C shims the aarch64-nintendo-horizon target needs"
+
+[features]
+default = []
+# Links NVK (mesa-switch's Vulkan driver, nvk/lib/libvulkan_bh.a from
+# scripts/build_nvk.sh + scripts/localize_nvk.sh, or HORIZON_NX_NVK_LIB).
+# Without it, compat provides a null vkGetInstanceProcAddr so wgpu's Vulkan
+# backend links and reports no driver.
+vulkan = []
+# Rust's blocks of 256 KiB and up go in NVK's top-down heap region (allocator.rs).
+# Sets the `#[global_allocator]`, so a game with its own can't use it.
+top_down_alloc = ["vulkan"]
+
+[dependencies]
+log = "0.4"
+
+[lints]
+workspace = true

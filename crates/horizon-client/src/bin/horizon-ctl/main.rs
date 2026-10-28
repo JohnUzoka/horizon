@@ -410,6 +410,10 @@ fn script(session: &mut Session, reader: impl BufRead, keep_going: bool, pretty:
 }
 
 fn main() -> ExitCode {
+    // Switch: bring up the BSD socket layer (this CLI connects to the game over a socket) and
+    // pull the libnx runtime hooks into the link.
+    #[cfg(target_os = "horizon")]
+    horizon_nx::init();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut socket = horizon_client::control::default_path();
     let mut timeout = None;

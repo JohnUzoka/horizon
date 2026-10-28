@@ -312,9 +312,18 @@ features = [
 ]
 default-features = false
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.ash]
+# horizon-port: Horizon has no dynamic loader, and libloading has a compile_error! for OSes it
+# doesn't know. ash's default `loaded` feature pulls libloading in, so it's off here; the Vulkan
+# driver (NVK) is linked statically and src/vulkan/instance.rs calls its vkGetInstanceProcAddr.
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "horizon")))'.dependencies.ash]
 version = "0.38"
 optional = true
+
+[target.'cfg(target_os = "horizon")'.dependencies.ash]
+version = "0.38"
+optional = true
+default-features = false
+features = ["debug", "std"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.gpu-allocator]
 version = "0.28"
@@ -327,7 +336,7 @@ version = "6"
 features = ["dynamic"]
 optional = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.libloading]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "horizon")))'.dependencies.libloading]
 version = "0.8"
 optional = true
 

@@ -412,6 +412,40 @@ fn warn_in_frame_deprecated(what: &str) {
          gets no fixes and will be removed soon. Do not use it: single player runs on its server thread by default."
     );
 }
+/// The folder the game's program sits in. Rust's std has no `current_exe` on Horizon, and a
+/// homebrew loader leaves the working directory undefined, so there the NRO's own path
+/// (argv[0]) gives it, with the working directory for a loader that passes no argv[0].
+fn exe_dir() -> Result<std::path::PathBuf> {
+    // horizon-nx is a Switch-only dependency, so `#[cfg]`, not `cfg!`.
+    #[cfg(target_os = "horizon")]
+    let dir = horizon_nx::nro_dir()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    #[cfg(not(target_os = "horizon"))]
+    let dir = std::env::current_exe()?
+        .parent()
+        .ok_or("missing executable directory")?
+        .to_path_buf();
+    Ok(dir)
+}
+/// The command line. A homebrew loader passes no arguments, so on the Switch an `args.txt`
+/// beside the NRO adds them: whitespace-separated tokens, `#` starting a comment that runs to
+/// the end of its line. This is how a render-distance cap or `--test-terrain` reaches the game
+/// without a reflash. The tokens are logged, so a mistyped file shows up in the log.
+fn launch_args() -> impl Iterator<Item = String> {
+    let mut file_args: Vec<String> = Vec::new();
+    if cfg!(target_os = "horizon") {
+        let text = exe_dir().and_then(|dir| Ok(std::fs::read_to_string(dir.join("args.txt"))?));
+        for line in text.as_deref().unwrap_or_default().lines() {
+            let line = line.split('#').next().unwrap_or_default();
+            file_args.extend(line.split_whitespace().map(str::to_string));
+        }
+        if !file_args.is_empty() {
+            log::info!("Horizon: args.txt next to the NRO supplied: {}", file_args.join(" "));
+        }
+    }
+    std::env::args().skip(1).chain(file_args)
+}
 impl Options {
     /// The name to join servers with: the one given, else the offline name kept
     /// next to options.txt (created on first use).
@@ -426,7 +460,7 @@ impl Options {
     /// The command line, then what it asks of the process: the game folder, the account.
     /// A bad command line is a [`launch_api::UsageError`] (exit code 2, no crash report).
     fn read() -> Result<Option<Self>> {
-        let Some(mut o) = Self::parse(std::env::args().skip(1))
+        let Some(mut o) = Self::parse(launch_args())
             .map_err(|e| launch_api::UsageError(e.to_string()))?
         else {
             return Ok(None);
@@ -482,12 +516,16 @@ impl Options {
     /// The command line alone: no file is read and nothing changes. `None` for `--help` and
     /// `--launch-api`, which print and end the run.
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Self>> {
-        let sibling = std::env::current_exe()?
-            .parent()
-            .ok_or("missing executable directory")?
-            .join("resources");
+        let exe_dir = exe_dir()?;
+        // Resources, in order: an embedded RomFS (elf2nro --romfsdir, personal testing only —
+        // shipping game files breaks the Minecraft EULA), then the loose tree beside the NRO,
+        // which is the only shippable layout: the user runs horizon-prepare on their own copy.
+        let romfs = std::path::Path::new("romfs:/resources");
+        let sibling = exe_dir.join("resources");
         let mut o = Self {
-            resources: if sibling.join("horizon-resources.json").exists() {
+            resources: if cfg!(target_os = "horizon") && romfs.join("horizon-resources.json").exists() {
+                romfs.to_path_buf()
+            } else if sibling.join("horizon-resources.json").exists() {
                 sibling
             } else {
                 std::path::Path::new(".local/horizon-client").join(horizon_core::VANILLA_VERSION)
@@ -535,6 +573,12 @@ impl Options {
             session_file: std::env::var("HORIZON_SESSION_FILE").ok(),
             session_stdin: false,
         };
+        // A homebrew loader passes no arguments, so the Switch build runs as a dedicated server
+        // unless a `client.txt` marker sits next to the NRO.
+        if cfg!(target_os = "horizon") && !exe_dir.join("client.txt").exists() {
+            o.execution_role = execution_role::ExecutionRole::DedicatedServer;
+            o.dedicated = Some(Vec::new());
+        }
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
@@ -15092,6 +15136,20 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Switch: drain the applet message queue each frame so the system reports focus and
+        // honors a HOME-button exit, and flush the log so a killed process keeps its tail.
+        // The winit Horizon loop turns the focus state into Resumed/Suspended; processing the
+        // messages here is what makes appletGetFocusState current for the next frame.
+        #[cfg(target_os = "horizon")]
+        if !horizon_nx::process_applet_messages() {
+            if let Err(error) = self.begin_closing_save(true) {
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+        }
+        #[cfg(target_os = "horizon")]
+        horizon_nx::flush_logs();
         if horizon_threads::stop_requests() > 0
             && self.pending_save.as_ref().is_none_or(|save| !save.quit)
         {

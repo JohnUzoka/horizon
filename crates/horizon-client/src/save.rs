@@ -148,8 +148,21 @@ impl SessionLock {
             .create(true)
             .truncate(false)
             .open(world.join("session.lock"))?;
-        file.try_lock()
-            .map_err(|_| format!("{} is already open in another instance", world.display()))?;
+        // newlib has no advisory locks: `try_lock` reports `Unsupported`, not that the
+        // world is taken. Homebrew runs one NRO at a time, so a real conflict (another
+        // instance holding the lock) can only show up as `WouldBlock`, which stays fatal.
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(format!("{} is already open in another instance", world.display()).into());
+            }
+            Err(e) if cfg!(target_os = "horizon") => {
+                let _ = e;
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(format!("{}: {e}", world.join("session.lock").display()).into());
+            }
+        }
         file.set_len(0)?;
         file.write_all(&[0x26, 0x03])?;
         file.flush()?;

@@ -50,12 +50,14 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
 /// with more wall time than CPU time waited (for a lock, or for a core on a
 /// busy machine).
 pub fn thread_cpu() -> Option<Duration> {
-    #[cfg(unix)]
+    // Horizon (libnx) implements only CLOCK_REALTIME/CLOCK_MONOTONIC; there is no thread CPU
+    // clock to read, so it takes the `None` path and the span reports wall time only.
+    #[cfg(all(unix, not(target_os = "horizon")))]
     {
         let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
         Some(Duration::new(t.tv_sec as u64, t.tv_nsec as u32))
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "horizon"))))]
     horizon_threads::thread_cpu()
 }
 
