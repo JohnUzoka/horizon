@@ -15,8 +15,8 @@ use parking_lot::{Mutex, RwLock};
 use super::{conv, descriptor::DescriptorCounts, RawTlasInstance};
 use crate::TlasInstance;
 
-/// [bevy-horizon patch] Whether `BH_RT_COMPRESSION=1` gives this texture memory of its own, on
-/// Horizon.
+/// [bevy-horizon patch] Whether this texture gets memory of its own on Horizon, for NVK to
+/// compress it (`BH_RT_COMPRESSION=0` turns it off).
 ///
 /// NVK compresses an image only when its memory was allocated for it alone, with
 /// `VkMemoryDedicatedAllocateInfo` naming it: mesa-switch's `nvk_device_memory.c` maps such an
@@ -26,9 +26,10 @@ use crate::TlasInstance;
 /// clears and compressed depth. Only single-sampled colour targets of 4, 8 or 16 bytes a texel and
 /// `Depth32Float` targets over 1 MiB qualify, as NVK prefers (`nvk_GetImageMemoryRequirements2`);
 /// NIL has no compressed kind for smaller texels. Storage images are left out, to start with the
-/// targets whose clears and blends compression is for. Off by default: mesa-switch's compressed
-/// path hadn't run on a Switch before this. The Bevy 0.18 copy (wgpu-hal 27, gpu-alloc) does the
-/// same in `Device::horizon_dedicated_texture`.
+/// targets whose clears and blends compression is for. On by default since it ran clean on a
+/// Switch (RUN 18, RUN 19a: 78.3 fps in the spot where RUN 19c ran 73.5 without it, though 19c
+/// also let threads onto core 3). The Bevy 0.18 copy (wgpu-hal 27, gpu-alloc) does the same in
+/// `Device::horizon_dedicated_texture`.
 fn horizon_rt_compression(desc: &crate::TextureDescriptor, size: u64) -> bool {
     if !cfg!(target_os = "horizon") {
         return false;
@@ -36,11 +37,11 @@ fn horizon_rt_compression(desc: &crate::TextureDescriptor, size: u64) -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static LOGGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     let on = *ON.get_or_init(|| {
-        let on = std::env::var("BH_RT_COMPRESSION").is_ok_and(|value| value.trim() == "1");
-        if on {
-            log::warn!("BH_RT_COMPRESSION=1: render targets get memory of their own, for NVK to compress");
+        let off = std::env::var("BH_RT_COMPRESSION").is_ok_and(|value| value.trim() == "0");
+        if off {
+            log::warn!("BH_RT_COMPRESSION=0: render targets share memory, so NVK won't compress them");
         }
-        on
+        !off
     });
     if !on || size <= 1 << 20 || desc.sample_count != 1 {
         return false;
@@ -1248,7 +1249,7 @@ impl crate::Device for super::Device {
 
         let name = desc.label.unwrap_or("Unlabeled texture");
 
-        // [bevy-horizon patch] `BH_RT_COMPRESSION=1`: see `horizon_rt_compression`.
+        // [bevy-horizon patch] Compressed render targets on Horizon: see `horizon_rt_compression`.
         let allocation_scheme = if horizon_rt_compression(desc, image.requirements.size) {
             gpu_allocator::vulkan::AllocationScheme::DedicatedImage(image.raw)
         } else {

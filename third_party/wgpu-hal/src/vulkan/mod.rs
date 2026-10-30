@@ -34,6 +34,10 @@ mod instance;
 mod sampler;
 mod semaphore_list;
 mod swapchain;
+#[cfg(target_os = "horizon")]
+mod horizon_counters;
+#[cfg(target_os = "horizon")]
+mod horizon_alloc;
 
 pub use adapter::PhysicalDeviceFeatures;
 
@@ -177,6 +181,10 @@ pub struct InstanceShared {
     /// It is associated with a `VkInstance` and its children,
     /// except for a `VkPhysicalDevice` and its children.
     instance_api_version: u32,
+    /// [bevy-horizon patch] The allocation callbacks the instance was created with, to destroy it
+    /// with the same ones: Horizon's (`horizon_alloc.rs`), or `None` elsewhere and for an instance
+    /// made outside wgpu-hal.
+    allocation_callbacks: Option<&'static vk::AllocationCallbacks<'static>>,
 
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
@@ -196,6 +204,7 @@ impl fmt::Debug for InstanceShared {
             has_nv_optimus,
             android_sdk_version,
             instance_api_version,
+            allocation_callbacks: _,
             drop_guard: _,
         } = self;
         f.debug_struct("InstanceShared")

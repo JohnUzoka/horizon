@@ -470,17 +470,23 @@ impl Swapchain for NativeSwapchain {
         // thus waited for `locked_swapchain_semaphores.acquire`, wait for all
         // of them to finish, thus ensuring that it's okay to pass `acquire` to
         // `vkAcquireNextImageKHR` again.
+        #[cfg(target_os = "horizon")]
+        let gpu_wait = std::time::Instant::now();
         let completed = self.device.wait_for_fence(
             fence,
             acquire_semaphore_guard.previously_used_submission_index,
             timeout_ns,
         )?;
+        #[cfg(target_os = "horizon")]
+        super::super::horizon_counters::gpu_wait(gpu_wait.elapsed());
         if !completed {
             return Err(crate::SurfaceError::Timeout);
         }
 
         let acquire_fence = self.fence.unwrap_or_else(vk::Fence::null);
 
+        #[cfg(target_os = "horizon")]
+        let image_wait = std::time::Instant::now();
         // will block if no image is available
         let (index, suboptimal) = match unsafe {
             profiling::scope!("vkAcquireNextImageKHR");
@@ -510,6 +516,8 @@ impl Swapchain for NativeSwapchain {
                 };
             }
         };
+        #[cfg(target_os = "horizon")]
+        super::super::horizon_counters::image_wait(image_wait.elapsed());
 
         if let Some(fence) = self.fence {
             unsafe {

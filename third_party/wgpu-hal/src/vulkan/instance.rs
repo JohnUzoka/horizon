@@ -384,6 +384,7 @@ impl super::Instance {
                 raw: raw_instance,
                 extensions,
                 drop_guard,
+                allocation_callbacks: None,
                 flags,
                 memory_budget_thresholds,
                 debug_utils,
@@ -847,6 +848,12 @@ impl super::Instance {
         if extensions.contains(&khr::portability_enumeration::NAME) {
             flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
         }
+        // [bevy-horizon patch] On Horizon, Mesa's allocations go through Rust's allocator
+        // (horizon_alloc.rs); the device and its objects inherit the instance's callbacks.
+        #[cfg(target_os = "horizon")]
+        let allocation_callbacks = super::horizon_alloc::callbacks();
+        #[cfg(not(target_os = "horizon"))]
+        let allocation_callbacks = None;
         let vk_instance = {
             let str_pointers = layers
                 .iter()
@@ -894,7 +901,7 @@ impl super::Instance {
 
             unsafe {
                 profiling::scope!("vkCreateInstance");
-                entry.create_instance(&create_info, None)
+                entry.create_instance(&create_info, allocation_callbacks)
             }
             .map_err(|e| {
                 crate::InstanceError::with_source(
@@ -904,7 +911,7 @@ impl super::Instance {
             })?
         };
 
-        unsafe {
+        let mut instance = unsafe {
             Self::from_raw(
                 entry,
                 vk_instance,
@@ -917,7 +924,12 @@ impl super::Instance {
                 has_nv_optimus,
                 None,
             )
-        }
+        }?;
+        // Destroyed with the callbacks it was created with. The Arc was made just now.
+        Arc::get_mut(&mut instance.shared)
+            .expect("a new instance's Arc is unique")
+            .allocation_callbacks = allocation_callbacks;
+        Ok(instance)
     }
 }
 
@@ -930,7 +942,7 @@ impl Drop for super::InstanceShared {
                     .destroy_debug_utils_messenger(du.messenger, None);
             });
             if self.drop_guard.is_none() {
-                self.raw.destroy_instance(None);
+                self.raw.destroy_instance(self.allocation_callbacks);
             }
         }
     }

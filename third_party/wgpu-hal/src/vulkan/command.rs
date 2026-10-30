@@ -329,10 +329,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
     ) where
         T: Iterator<Item = crate::BufferCopy>,
     {
-        let vk_regions_iter = regions.map(|r| vk::BufferCopy {
-            src_offset: r.src_offset,
-            dst_offset: r.dst_offset,
-            size: r.size.get(),
+        let vk_regions_iter = regions.map(|r| {
+            #[cfg(target_os = "horizon")]
+            super::horizon_counters::copied(r.size.get());
+            vk::BufferCopy {
+                src_offset: r.src_offset,
+                dst_offset: r.dst_offset,
+                size: r.size.get(),
+            }
         });
 
         unsafe {
@@ -783,6 +787,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         &mut self,
         desc: &crate::RenderPassDescriptor<super::QuerySet, super::TextureView>,
     ) -> Result<(), crate::DeviceError> {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::pass();
         let mut vk_clear_values =
             ArrayVec::<vk::ClearValue, { super::MAX_TOTAL_ATTACHMENTS }>::new();
         let mut rp_key = super::RenderPassKey {
@@ -1072,6 +1078,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::direct(u64::from(vertex_count) * u64::from(instance_count));
         if self.current_pipeline_is_multiview
             && (first_instance as u64 + instance_count as u64 - 1)
                 > self.device.private_caps.multiview_instance_index_limit as u64
@@ -1096,6 +1104,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::direct(u64::from(index_count) * u64::from(instance_count));
         if self.current_pipeline_is_multiview
             && (first_instance as u64 + instance_count as u64 - 1)
                 > self.device.private_caps.multiview_instance_index_limit as u64
@@ -1133,6 +1143,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::indirect(draw_count);
         if draw_count >= 1
             && self.device.private_caps.multi_draw_indirect
             && draw_count <= self.device.private_caps.max_draw_indirect_count
@@ -1169,6 +1181,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::indirect(draw_count);
         if draw_count >= 1
             && self.device.private_caps.multi_draw_indirect
             && draw_count <= self.device.private_caps.max_draw_indirect_count
@@ -1227,6 +1241,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         count_offset: wgt::BufferAddress,
         max_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::indirect(max_count);
         let stride = size_of::<wgt::DrawIndirectArgs>() as u32;
         match self.device.extension_fns.draw_indirect_count {
             Some(ref t) => {
@@ -1253,6 +1269,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         count_offset: wgt::BufferAddress,
         max_count: u32,
     ) {
+        #[cfg(target_os = "horizon")]
+        super::horizon_counters::indirect(max_count);
         let stride = size_of::<wgt::DrawIndexedIndirectArgs>() as u32;
         match self.device.extension_fns.draw_indirect_count {
             Some(ref t) => {
