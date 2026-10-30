@@ -91,13 +91,25 @@ impl Pads {
     /// the pads' state and its button edges. Game actions, rumble and the
     /// virtual pad of `horizon-ctl` start with the game.
     pub(super) fn poll_title(&mut self, settings: &gamepad::PadSettings) -> Vec<(Button, bool)> {
-        let state = self.read();
+        let state = self.read_parts(settings);
         let edges = self.edges.update(&state, settings.trigger_threshold);
         if state.active(settings) {
             self.in_use = true;
         }
         self.state = state;
         edges
+    }
+
+    /// The active pad's state, a Nintendo pad's face buttons by their letters when the settings
+    /// ask for it (`PadSettings::nintendo_letters`).
+    fn read_parts(&mut self, settings: &gamepad::PadSettings) -> PadState {
+        let state = self.read();
+        if self.by_letter(settings) { state.by_letter() } else { state }
+    }
+
+    /// The active pad is a Nintendo one going by its letters.
+    fn by_letter(&self, settings: &gamepad::PadSettings) -> bool {
+        self.style == GlyphStyle::Nintendo && settings.nintendo_letters
     }
 }
 
@@ -115,8 +127,12 @@ impl Game<'_> {
             }
             return;
         }
-        let hardware = self.pad.read();
-        self.ui.options.pad_style = self.settings.controller.glyphs.resolve(self.pad.style);
+        let hardware = self.pad.read_parts(settings);
+        let style = settings.glyphs.resolve(self.pad.style);
+        self.ui.options.pad_style = style;
+        // Nintendo glyphs on a pad going by its letters name the button playing each part.
+        self.ui.options.pad_by_letter =
+            style == GlyphStyle::Nintendo && self.pad.by_letter(settings);
         let state = hardware.merge(&self.pad.injected);
         self.pad.virtual_input = self.pad.injected != PadState::default();
         for button in std::mem::take(&mut self.pad.taps) {

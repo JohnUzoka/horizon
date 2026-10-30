@@ -73,6 +73,13 @@ toggles by default (holding a stick in while steering the camera is
 awkward, which is why Bedrock does the same); the controls options can make it
 hold-to-sneak.
 
+A Nintendo pad's face buttons can go by their places, as the table and SDL's layout have them
+(B, at the bottom, jumps and confirms), or by their letters, as the Switch's own menus and
+keyboard do: A (right) jumps and confirms, B goes back and drops, X swaps the offhand, Y opens
+the inventory, and the prompts show those letters. `nintendoLetters:true|false` in
+`horizon-controller.txt` picks one; the Switch build goes by letters, every other build by
+places. Bindings name the part, so a rebinding means the same on either.
+
 ## Menus and inventories
 
 Vanilla's screens are all mouse-driven, and Horizon draws them 1:1. A pad
