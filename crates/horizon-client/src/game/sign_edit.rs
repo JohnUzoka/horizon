@@ -544,6 +544,29 @@ impl Game<'_> {
         }
         self.sign_keep(before);
     }
+    /// The line being edited, for the Switch's keyboard to start from.
+    #[cfg(target_os = "horizon")]
+    pub(super) fn sign_text(&self) -> Option<String> {
+        self.sign_edit.as_ref().map(|e| e.edit.value.clone())
+    }
+    /// The line being edited becomes `text`, from the Switch's keyboard. Text
+    /// too wide for the sign keeps what fits, as typing it would.
+    #[cfg(target_os = "horizon")]
+    pub(super) fn sign_replace(&mut self, text: &str) {
+        self.sign_change(|edit| edit.set_value(text));
+        if self.sign_text().as_deref() == Some(text) {
+            return;
+        }
+        self.sign_change(|edit| edit.set_value(""));
+        let mut buf = [0; 4];
+        for c in text.chars() {
+            let before = self.sign_text();
+            self.sign_change(|edit| edit.insert_text(c.encode_utf8(&mut buf)));
+            if self.sign_text() == before {
+                break;
+            }
+        }
+    }
     /// Write the box when the line still fits; otherwise put the old text back.
     fn sign_keep(&mut self, before: Option<(String, usize, usize)>) {
         let value = self

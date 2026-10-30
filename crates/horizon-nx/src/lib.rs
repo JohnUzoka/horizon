@@ -10,7 +10,7 @@
 //!
 //! `init` runs the service setup (romfs, BSD sockets, applet focus mode) and starts the log
 //! writer; call it first thing in `main`. `flush_logs` and `process_applet_messages` are for the
-//! game loop (Phase 2).
+//! game loop (Phase 2); `software_keyboard` shows the system keyboard for text entry.
 
 pub mod compat;
 pub mod lifecycle;
@@ -20,6 +20,8 @@ pub mod logging;
 mod memory;
 #[cfg(all(target_os = "horizon", feature = "top_down_alloc"))]
 mod allocator;
+#[cfg(target_os = "horizon")]
+mod keyboard;
 #[cfg(all(target_os = "horizon", feature = "vulkan"))]
 pub mod nvk_tune;
 #[cfg(target_os = "horizon")]
@@ -29,6 +31,8 @@ pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
     thread_logging,
 };
+#[cfg(target_os = "horizon")]
+pub use keyboard::software_keyboard;
 pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
     suspend_until_out_of_background,

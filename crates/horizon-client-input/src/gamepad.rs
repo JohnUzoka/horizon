@@ -341,7 +341,7 @@ impl MenuNav {
 /// The on-screen keyboard A opens on a text field in focus mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextKeyboard {
-    /// Steam's on a Steam Deck under Steam, else Horizon's.
+    /// Steam's on a Steam Deck under Steam, the Switch's on a Switch, else Horizon's.
     #[default]
     Auto,
     Horizon,
@@ -378,6 +378,12 @@ pub fn steam_keyboard(choice: TextKeyboard) -> bool {
         TextKeyboard::Horizon => false,
         TextKeyboard::Auto => std::env::var("SteamDeck").is_ok_and(|v| v == "1"),
     }
+}
+
+/// Whether A on a text field opens the Switch's own keyboard (the system applet) instead of
+/// Horizon's: `Auto` on a Switch.
+pub fn switch_keyboard(choice: TextKeyboard) -> bool {
+    cfg!(target_os = "horizon") && choice == TextKeyboard::Auto
 }
 
 /// The controller settings (`horizon-controller.txt`).

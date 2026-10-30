@@ -1,8 +1,9 @@
 # Controllers
 
 Horizon plays with PlayStation (DualShock 4, DualSense), Xbox (360, One,
-Series) and Nintendo Switch Pro controllers, and on the Steam Deck with its
-built-in controls. Keyboard and mouse keep working exactly as before: with no
+Series) and Nintendo Switch Pro controllers, on the Steam Deck with its
+built-in controls, and on a Nintendo Switch with its own (handheld, Joy-Con,
+Pro Controller). Keyboard and mouse keep working exactly as before: with no
 controller connected, or with controllers turned off, nothing changes.
 
 ## What vanilla has
@@ -18,7 +19,8 @@ design for any new screen.
 ## Input layer
 
 [gilrs](https://crates.io/crates/gilrs) reads the pads: evdev on Linux (with
-libudev for hot-plugging), IOKit on macOS, Windows.Gaming.Input on Windows.
+libudev for hot-plugging), IOKit on macOS, Windows.Gaming.Input on Windows,
+libnx's npad on the Switch (a backend in `third_party/gilrs-core`, below).
 Its SDL mapping database normalizes every pad to one positional layout
 (South/East/West/North face buttons, bumpers, triggers, sticks, D-pad,
 Select/Start). No second windowing or event stack: gilrs is polled once per
@@ -172,8 +174,13 @@ creative and recipe-book searches, the anvil, the LAN port.
 
 On a Steam Deck under Steam (`SteamDeck=1`), A asks Steam for its own
 keyboard instead (`steam://open/keyboard`), which types like a real keyboard;
-Steam + X opens it at any time. "On-Screen Keyboard: Auto / Horizon / Steam"
-(`keyboard:`) picks one.
+Steam + X opens it at any time. On a Switch, A opens the Switch's own keyboard
+(the system applet, `horizon_nx::software_keyboard`): it takes the screen
+until OK or cancel, starting from the field's text, which its text then
+replaces (a book page and the options' boxes start empty and get it typed in);
+OK on chat sends it, cancel closes chat.
+"On-Screen Keyboard: Auto / Horizon / Steam" (`keyboard:`) picks one; Auto is
+Steam's on a Steam Deck, the Switch's on a Switch, else Horizon's.
 
 ### Screens covered
 
@@ -248,10 +255,11 @@ sensitivity, slower while scoping with a spyglass.
 Vibration (on by default, off in the options): taking damage (stronger with
 the damage), a block broken, an explosion nearby (scaled by distance), a totem
 of undying. Short, low-intensity pulses, as on Bedrock. A DualSense gets them
-shaped, through its own output report (below), on every OS. Other pads go through
-gilrs force feedback: Linux (evdev force feedback, including Steam Input's
-virtual pad) and Windows support it; macOS gilrs has no force feedback, so it
-is silently skipped there.
+shaped, through its own output report (below), on every OS but iOS and the
+Switch, which have no HID access. Other pads go through gilrs force feedback:
+Linux (evdev force feedback, including Steam Input's virtual pad), Windows and
+the Switch support it; macOS gilrs has no force feedback, so it is silently
+skipped there.
 
 ## DualSense output
 
@@ -482,6 +490,26 @@ Bluetooth.
   the controls as a gamepad too (while Steam isn't holding them), so it also
   works out of the box.
 - Text entry uses Steam's keyboard (Steam + X).
+
+## Nintendo Switch
+
+- gilrs-core has no Switch backend of its own, so the workspace patches it
+  with `third_party/gilrs-core` (0.6.8 plus `src/platform/horizon/`). It reads
+  libnx's default pad, which merges player 1 and the handheld controls: the
+  console in handheld mode, a pair of Joy-Con held together or a Pro
+  Controller all come through as one pad. A single sideways Joy-Con is not
+  supported.
+- Buttons are reported by position: B is South, A East, Y West, X North;
+  L/R are the bumpers, ZL/ZR the triggers (digital), Minus/Plus are
+  Select/Start. The vendor is Nintendo's, so the glyphs are Nintendo's (B A Y
+  X by position) and the mapping table above applies by position: B jumps, ZR
+  attacks, ZL uses.
+- Rumble drives both vibration devices of the controller in use: the strong
+  motor's level on the low band (160 Hz) and the weak one's on the high band
+  (320 Hz).
+- Text entry uses the Switch's keyboard (Text fields, above).
+- `horizon-dualsense` builds without hidapi, as on iOS: there is no HID access
+  for a DualSense, so its output never opens.
 
 ## PR plan
 

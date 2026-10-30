@@ -146,6 +146,11 @@ impl Game<'_> {
         self.active_book().is_some_and(|b| self.book_open(b))
             && self.recipe_ui.search.as_ref().is_some_and(|s| s.focused)
     }
+    /// The search box's text, for the Switch's keyboard to start from.
+    #[cfg(target_os = "horizon")]
+    pub(super) fn recipe_search_text(&self) -> Option<String> {
+        self.recipe_ui.search.as_ref().map(|s| s.value.clone())
+    }
     /// `keyChat` focuses the search box.
     pub(super) fn recipe_focus_search(&mut self) {
         if self.active_book().is_some_and(|b| self.book_open(b))

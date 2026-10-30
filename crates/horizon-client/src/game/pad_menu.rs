@@ -865,10 +865,17 @@ impl Game<'_> {
             || self.station_typing()
     }
 
-    /// Open the on-screen keyboard over the focused field: Horizon's, or
+    /// Open the on-screen keyboard over the focused field: Horizon's,
     /// Steam's on a Steam Deck (`steam://open/keyboard`, which types into
-    /// the window like a real keyboard).
+    /// the window like a real keyboard), or the Switch's on a Switch.
     fn pad_open_keyboard(&mut self) {
+        #[cfg(target_os = "horizon")]
+        {
+            if gamepad::switch_keyboard(self.settings.controller.keyboard) {
+                self.pad_switch_keyboard();
+                return;
+            }
+        }
         // Without xdg-open (macOS, Windows), Horizon's keyboard instead.
         if gamepad::steam_keyboard(self.settings.controller.keyboard)
             && std::process::Command::new("xdg-open")
@@ -882,6 +889,95 @@ impl Game<'_> {
             return;
         }
         self.pad.menu.osk = Some(Keyboard::default());
+    }
+
+    /// The Switch's keyboard (the system applet) takes the screen until the
+    /// player confirms or cancels. It starts from the focused field's text and
+    /// what comes back replaces it (a book page, the options' and the world
+    /// options' boxes start empty and get it typed in); confirming chat sends
+    /// it, cancelling chat closes it, as chat was opened only to type.
+    #[cfg(target_os = "horizon")]
+    fn pad_switch_keyboard(&mut self) {
+        let chat = self.screen == Screen::Chat && self.title.is_none();
+        let current = self.pad_field_text();
+        let Some(text) = horizon_nx::software_keyboard(current.as_deref().unwrap_or_default())
+        else {
+            if chat {
+                self.close_chat(super::chat::ChatExit::Intentional);
+            }
+            return;
+        };
+        if current.is_some() {
+            self.pad_replace_field(&text);
+        } else if !text.is_empty() {
+            self.pad_osk_output(osk::Output::Text(text));
+        }
+        if chat {
+            self.pad_osk_output(osk::Output::Enter);
+        }
+    }
+
+    /// The focused field's text, for the Switch's keyboard to start from;
+    /// None where it starts empty and its text is typed in (a book page, the
+    /// options' and the world options' boxes). The order is `pad_osk_output`'s.
+    #[cfg(target_os = "horizon")]
+    fn pad_field_text(&mut self) -> Option<String> {
+        if self.screen == Screen::Chat && self.title.is_none() {
+            return self.ui.chat_screen.as_ref().map(|s| s.value().to_owned());
+        }
+        if self.sign_edit.is_some() {
+            return self.sign_text();
+        }
+        if self.book.is_some() {
+            return None;
+        }
+        if self.screen == Screen::Creative && self.creative_screen.tab().search {
+            return Some(self.creative_screen.search.value.clone());
+        }
+        if self.recipe_search_focused() {
+            return self.recipe_search_text();
+        }
+        if self.station_typing() {
+            return self.station.as_ref().map(|s| s.rename.value.clone());
+        }
+        if matches!(self.screen, Screen::WorldOptions | Screen::Options) {
+            return None;
+        }
+        let (_, value, _) = self.title.as_mut()?.focused_field()?;
+        Some(value.clone())
+    }
+
+    /// `text` takes the place of the focused field's text (`pad_field_text`
+    /// gave it): Select All, then typing replaces the selection, or a
+    /// backspace deletes it when nothing came back, so the field's own filter
+    /// and length limit apply.
+    #[cfg(target_os = "horizon")]
+    fn pad_replace_field(&mut self, text: &str) {
+        use horizon_client::clipboard::EditShortcut::SelectAll;
+        if self.screen == Screen::Chat && self.title.is_none() {
+            self.chat_replace(text);
+            return;
+        }
+        if self.sign_edit.is_some() {
+            self.sign_replace(text);
+            return;
+        }
+        if self.screen == Screen::Creative && self.creative_screen.tab().search {
+            self.creative_search_shortcut(SelectAll);
+        } else if self.recipe_search_focused() {
+            self.recipe_shortcut(SelectAll);
+        } else if self.station_typing() {
+            self.station_shortcut(SelectAll);
+        } else if self.title.is_some() {
+            self.title_shortcut(SelectAll);
+        } else {
+            return;
+        }
+        if text.is_empty() {
+            self.pad_osk_output(osk::Output::Backspace);
+        } else {
+            self.pad_osk_output(osk::Output::Text(text.to_owned()));
+        }
     }
 
     /// Chat or a sign opened by the pad in focus mode: the keyboard opens

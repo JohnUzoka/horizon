@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/gilrs-core"]
 members = [
     "crates/horizon-nx",
     "crates/horizon-core",
@@ -57,6 +57,10 @@ large_enum_variant = "allow"
 # Drop this and the folder once a wgpu release has both fixes.
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
+# gilrs-core 0.6.8 with a Nintendo Switch backend (`src/platform/horizon/`: libnx's npad and its
+# vibration); every other platform's code is the release's. Drop this and the folder once a
+# gilrs-core release has a Horizon backend.
+gilrs-core = { path = "third_party/gilrs-core" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.

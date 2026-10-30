@@ -821,6 +821,19 @@ impl Game<'_> {
             screen.type_text(&m, &c, text);
         }
     }
+    /// The chat box's text becomes `text`: the Switch's keyboard hands back
+    /// the whole line, started from what was there.
+    #[cfg(target_os = "horizon")]
+    pub(super) fn chat_replace(&mut self, text: &str) {
+        let m = Measure(&self.gui.atlas.font);
+        let c = Commands {
+            dispatcher: chat_tree(&self.remote),
+            registries: &self.ui.registries,
+        };
+        if let Some(screen) = self.ui.chat_screen.as_mut() {
+            screen.suggest_command(&m, &c, text);
+        }
+    }
     /// ChatScreen.handleChatInput: history, then a command or a chat line.
     /// The Chat option's restrictions stop the message here too, so a
     /// control-socket `chat` cannot send what the player's setting hides.
