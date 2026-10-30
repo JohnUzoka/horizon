@@ -1025,7 +1025,9 @@ impl Game<'_> {
     }
 
     /// Chat or a sign opened by the pad in focus mode: the keyboard opens
-    /// with it (once per screen; B closes it for good).
+    /// with it (once per screen; B closes it for good). Not the chat a sleeper
+    /// gets (`InBedChatScreen`): the game opens that one, not the player, so
+    /// the keyboard waits for A on its chat box.
     fn pad_auto_keyboard(&mut self) {
         let menu = &self.pad.menu;
         if menu.osk.is_none()
@@ -1033,7 +1035,7 @@ impl Game<'_> {
             && self.pad.in_use
             && menu.open_polls >= 3
             && self.pad_focus_mode()
-            && (self.screen == Screen::Chat || self.sign_edit.is_some())
+            && ((self.screen == Screen::Chat && !self.ui.in_bed_chat) || self.sign_edit.is_some())
         {
             self.pad.menu.osk_dismissed = true;
             self.pad_open_keyboard();
