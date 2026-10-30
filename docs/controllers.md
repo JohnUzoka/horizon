@@ -197,6 +197,18 @@ world options. Where a screen draws something clickable no target names
 (the advancements map, the statistics lists, the pack screen's rows, the
 book's page text), the right stick click gives the pointer for that screen.
 
+### The startup title
+
+The title shown while the game's core still loads (`game/startup_menu.rs`,
+before `Game` exists) takes the pad from its first frame: the pads open with
+it, and it runs focus mode on the same targets with the same pointer events
+(D-pad or left stick move focus, A presses, B and Menu go back, the bumpers
+switch tabs, the right stick scrolls, left and right move a focused slider,
+A on a text field opens the Switch's keyboard there). It has no pointer mode
+or on-screen keyboard of its own. When the game takes over, the pads and the
+focused widget go with the screen (`StartupMenu::handoff`), so focus stays
+where it was.
+
 ## Glyphs
 
 Horizon draws its own button glyphs in the HUD and screens (no Mojang

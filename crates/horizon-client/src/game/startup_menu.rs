@@ -1,9 +1,12 @@
 //! The interactive title before world resources exist. Uses only the menu
-//! atlas/panorama; transfers the actual screen and queued entry to Game.
+//! atlas/panorama; transfers the actual screen and queued entry to Game. A
+//! controller works on it from its first frame (`poll_title_pad`).
 use super::*;
 use horizon_client::{
     clipboard::{self, AppendSelection, SystemClipboard},
+    gamepad::{self, Button},
     options_ui::{Event, OptionsUi, Page},
+    widgets::{self, Kind, Target},
 };
 use winit::{event::KeyEvent, keyboard::ModifiersState};
 
@@ -25,6 +28,11 @@ pub(super) struct StartupMenu {
     pub pending: Option<PendingWorldEntry>,
     pub reload_packs: bool,
     pub perf: horizon_client::telemetry::Session,
+    /// The controllers, opened with the title so they work from its first
+    /// frame, and handed to `Game` with the screen.
+    pads: super::pad::Pads,
+    /// Where the pad is on the title.
+    nav: TitleNav,
 }
 
 impl StartupMenu {
@@ -94,6 +102,10 @@ impl StartupMenu {
         game.clipboard = std::mem::take(&mut self.clipboard);
         game.text_selection = std::mem::take(&mut self.selection);
         game.perf = std::mem::take(&mut self.perf);
+        game.pad = std::mem::take(&mut self.pads);
+        game.pad
+            .menu
+            .carry(self.nav.focus, self.nav.pos, self.nav.os_hidden);
         // Preserve an existing resource-error screen opened by start_game.
         if self.options_open {
             let resource_error = game.ui.options.resource_error.take();
@@ -223,6 +235,409 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("Box<dyn Any>")
+}
+
+/// Where the pad is on the startup title: focus navigation, as the game's pad
+/// menus do it in focus mode (`pad_menu.rs`); the title has no pointer mode of
+/// its own.
+#[derive(Default)]
+struct TitleNav {
+    /// The focused target as last drawn; None until the pad is used.
+    focus: Option<Target>,
+    /// Where the pad put the pointer (GUI pixels); a mouse or a touch
+    /// elsewhere takes it back.
+    pos: Option<(f32, f32)>,
+    /// The OS pointer is hidden while the pad drives.
+    os_hidden: bool,
+    last_poll: Option<Instant>,
+    /// The held direction, when it last stepped, and whether it repeats yet.
+    repeat: Option<(Button, Instant, bool)>,
+    /// Steps since the held direction went down (sliders speed up).
+    repeats: u32,
+    /// The left stick's step direction last poll.
+    stick: Option<Button>,
+    wheel: [f32; 2],
+    /// The focused slider being nudged and where the pad put its handle.
+    nudge: Option<(gamepad::Rect, f32)>,
+    /// A step that ran off the visible rows of a list, which was scrolled:
+    /// it goes on once the next frame is drawn.
+    pending: Option<TitlePending>,
+    /// Frames the title drew: each makes its widgets the last frame's
+    /// (`widgets::end_frame`), the targets the pad steps between.
+    frames: u64,
+}
+
+struct TitlePending {
+    button: Button,
+    from: gamepad::Rect,
+    generation: u64,
+    before: Vec<gamepad::Rect>,
+}
+
+/// A controller on the startup title, from its first frame: the pads open with
+/// the title, the D-pad or the left stick moves focus between the widgets it
+/// draws (vanilla's arrow-key step), A presses, B goes back, the bumpers switch
+/// tabs, the right stick scrolls, and A on a text field opens the Switch's
+/// keyboard there. It feeds `menu_event` the pointer events a mouse sends, as
+/// the game's pad menus feed `window_event`, and the pads and the focus go to
+/// `Game` with the screen (`StartupMenu::handoff`).
+impl Loading {
+    /// Once per loop iteration while loading.
+    pub(super) fn poll_title_pad(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.settings.controller.enabled {
+            return;
+        }
+        let edges = self.menu.pads.poll_title(&self.settings.controller);
+        let now = Instant::now();
+        let seconds = self
+            .menu
+            .nav
+            .last_poll
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.05));
+        self.menu.nav.last_poll = Some(now);
+        if self.gui.is_none() || self.menu.win.is_some() {
+            return;
+        }
+        // A world on its way: B cancels it, as Escape does.
+        if self.menu.pending.is_some() {
+            if edges
+                .iter()
+                .any(|&(b, down)| down && matches!(b, Button::East | Button::Start))
+            {
+                self.menu.pending = None;
+                self.menu.perf.cancel_world_opening();
+            }
+            return;
+        }
+        // A mouse move or a touch takes the pointer back.
+        if let Some(at) = self.menu.nav.pos
+            && ((at.0 - self.menu.cursor.0).abs() > 0.5 || (at.1 - self.menu.cursor.1).abs() > 0.5)
+        {
+            self.menu.nav.pos = None;
+            self.menu.nav.focus = None;
+            self.menu.nav.pending = None;
+            self.title_show_os_pointer(true);
+        }
+        let batch = HudBatch::new(self.menu_size());
+        let targets = super::pad_menu::on_screen(super::pad_menu::widget_targets(), &batch);
+        self.title_follow_focus(event_loop, &targets);
+        for (button, down) in edges {
+            self.title_pad_button(event_loop, button, down, &targets);
+        }
+        let (move_deadzone, look_deadzone) = (
+            self.settings.controller.move_deadzone,
+            self.settings.controller.look_deadzone,
+        );
+        let state = self.menu.pads.state;
+        // The left stick steps like the D-pad.
+        let dir = gamepad::stick_direction(
+            gamepad::radial(state.left, move_deadzone),
+            super::pad_menu::STICK_STEP,
+        );
+        if dir != self.menu.nav.stick {
+            if let Some((b, ..)) = self.menu.nav.repeat
+                && Some(b) == self.menu.nav.stick
+            {
+                self.menu.nav.repeat = None;
+            }
+            self.menu.nav.stick = dir;
+            if let Some(button) = dir {
+                self.menu.nav.repeats = 0;
+                self.title_step(event_loop, button, &targets);
+                self.menu.nav.repeat = Some((button, now, false));
+            }
+        }
+        // The right stick scrolls.
+        let scroll = gamepad::radial(state.right, look_deadzone);
+        let wheel = &mut self.menu.nav.wheel;
+        wheel[0] += scroll[0] * super::pad_menu::SCROLL_SPEED * seconds;
+        wheel[1] += scroll[1] * super::pad_menu::SCROLL_SPEED * seconds;
+        if scroll == [0.0, 0.0] {
+            *wheel = [0.0, 0.0];
+        }
+        let lines = [wheel[0].trunc(), wheel[1].trunc()];
+        if lines != [0.0, 0.0] {
+            wheel[0] -= lines[0];
+            wheel[1] -= lines[1];
+            // Stick right scrolls right: the wheel's x runs the other way.
+            self.title_event(event_loop, super::pad_menu::wheel(-lines[0], lines[1]));
+        }
+        // A held direction repeats.
+        if let Some((button, since, repeating)) = self.menu.nav.repeat {
+            let wait = if repeating {
+                super::pad_menu::REPEAT_EVERY
+            } else {
+                super::pad_menu::REPEAT_DELAY
+            };
+            if now.duration_since(since).as_secs_f32() >= wait {
+                self.menu.nav.repeat = Some((button, now, true));
+                self.menu.nav.repeats = self.menu.nav.repeats.saturating_add(1);
+                self.title_step(event_loop, button, &targets);
+            }
+        }
+    }
+
+    fn title_pad_button(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        button: Button,
+        down: bool,
+        targets: &[Target],
+    ) {
+        if !down {
+            if self.menu.nav.repeat.is_some_and(|r| r.0 == button) {
+                self.menu.nav.repeat = None;
+            }
+            return;
+        }
+        match button {
+            Button::East | Button::Start => self.title_back(),
+            Button::South => match self.menu.nav.focus {
+                // The first press shows where focus is.
+                None => self.title_focus_first(event_loop, targets),
+                Some(focus) => match focus.kind {
+                    // A click would jump the handle; left/right move it.
+                    Kind::Slider { .. } => {}
+                    Kind::Field => {
+                        self.title_click(event_loop, focus.center());
+                        self.title_keyboard();
+                    }
+                    _ => self.title_click(event_loop, focus.center()),
+                },
+            },
+            Button::DPadUp | Button::DPadDown | Button::DPadLeft | Button::DPadRight => {
+                self.menu.nav.repeats = 0;
+                self.title_step(event_loop, button, targets);
+                self.menu.nav.repeat = Some((button, Instant::now(), false));
+            }
+            Button::LeftBumper | Button::RightBumper => {
+                self.title_tab(event_loop, button == Button::RightBumper, targets);
+            }
+            _ => {}
+        }
+    }
+
+    /// B and Start: what Escape does on the title.
+    fn title_back(&mut self) {
+        if self.menu.options_open {
+            if let Some(gui) = &self.gui {
+                let events =
+                    self.menu
+                        .options
+                        .key(&mut self.settings, &gui.atlas, KeyCode::Escape, None);
+                self.menu_option_events(events);
+            }
+        } else if let Some(title) = &mut self.menu.title {
+            title.escape();
+            self.save_menu_address();
+        }
+    }
+
+    /// A on a text field (on a Switch): its keyboard, starting from the field's
+    /// text, which what comes back replaces, as in the game's menus. Elsewhere
+    /// the field takes focus for a real keyboard.
+    fn title_keyboard(&mut self) {
+        #[cfg(target_os = "horizon")]
+        {
+            use horizon_client::clipboard::EditShortcut::SelectAll;
+            if self.menu.options_open {
+                if let Some(text) = horizon_nx::software_keyboard("")
+                    && let Some(gui) = &self.gui
+                {
+                    self.menu.options.type_text(&gui.atlas, &text);
+                }
+                return;
+            }
+            let Some(title) = self.menu.title.as_mut() else {
+                return;
+            };
+            let Some((_, value, _)) = title.focused_field() else {
+                return;
+            };
+            let initial = value.clone();
+            let Some(text) = horizon_nx::software_keyboard(&initial) else {
+                return;
+            };
+            title.field_shortcut(SelectAll, &mut self.menu.clipboard);
+            if text.is_empty() {
+                title.backspace();
+            } else {
+                title.type_text(&text);
+            }
+            self.save_menu_address();
+        }
+    }
+
+    /// One step of the D-pad or the stick: focus moves (a focused slider's
+    /// value moves left and right instead).
+    fn title_step(&mut self, event_loop: &ActiveEventLoop, button: Button, targets: &[Target]) {
+        let Some(focus) = self.menu.nav.focus else {
+            self.title_focus_first(event_loop, targets);
+            return;
+        };
+        if let Kind::Slider { value, track } = focus.kind
+            && matches!(button, Button::DPadLeft | Button::DPadRight)
+        {
+            let from = match self.menu.nav.nudge {
+                Some((rect, x)) if rect == focus.rect => x,
+                _ => gamepad::slider_x(track, value),
+            };
+            let step = gamepad::slider_step(self.menu.nav.repeats);
+            let x = (from
+                + if button == Button::DPadLeft {
+                    -step
+                } else {
+                    step
+                })
+            .clamp(track[0], track[0] + track[1]);
+            self.menu.nav.nudge = Some((focus.rect, x));
+            self.title_click(event_loop, (x, focus.center().1));
+            return;
+        }
+        let rects: Vec<gamepad::Rect> = targets.iter().map(|t| t.rect).collect();
+        let vertical = matches!(button, Button::DPadUp | Button::DPadDown);
+        let step = if vertical {
+            gamepad::focus_step_strict(focus.rect, button, &rects)
+        } else {
+            gamepad::focus_step_rect(focus.rect, button, &rects)
+        };
+        match step {
+            Some(i) => self.title_focus_on(event_loop, targets[i]),
+            // Off the visible rows of a list: scroll it and go on next frame.
+            None if vertical => {
+                let up = button == Button::DPadUp;
+                self.title_event(
+                    event_loop,
+                    super::pad_menu::wheel(0.0, if up { 1.0 } else { -1.0 }),
+                );
+                self.menu.nav.pending = Some(TitlePending {
+                    button,
+                    from: focus.rect,
+                    generation: widgets::generation(),
+                    before: rects,
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// A bumper: the next or previous tab (world creation, the options).
+    fn title_tab(&mut self, event_loop: &ActiveEventLoop, next: bool, targets: &[Target]) {
+        let tabs: Vec<(gamepad::Rect, bool)> = targets
+            .iter()
+            .filter_map(|t| match t.kind {
+                Kind::Tab(selected) => Some((t.rect, selected)),
+                _ => None,
+            })
+            .collect();
+        let Some(i) = gamepad::tab_step(&tabs, next) else {
+            return;
+        };
+        let rect = tabs[i].0;
+        self.title_click(event_loop, (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0));
+        // The page changed under the old focus: start again on the new one.
+        self.menu.nav.focus = Some(Target {
+            rect,
+            kind: Kind::Tab(true),
+        });
+    }
+
+    /// Each poll: finish a step that scrolled a list, find the focused widget
+    /// in the new frame (a screen changed: the first one), and keep the
+    /// hidden pointer on it.
+    fn title_follow_focus(&mut self, event_loop: &ActiveEventLoop, targets: &[Target]) {
+        let rects: Vec<gamepad::Rect> = targets.iter().map(|t| t.rect).collect();
+        if self
+            .menu
+            .nav
+            .pending
+            .as_ref()
+            .is_some_and(|p| widgets::generation() > p.generation)
+            && let Some(p) = self.menu.nav.pending.take()
+        {
+            // Go on from where the focused row moved, or take vanilla's vague
+            // pass when nothing scrolled.
+            let step = match gamepad::scroll_shift(&p.before, &rects) {
+                Some(dy) => {
+                    let mut from = p.from;
+                    from[1] += dy;
+                    if let Some(i) = gamepad::refind(from, &rects, 2.0) {
+                        self.menu.nav.focus = Some(targets[i]);
+                    }
+                    gamepad::focus_step_strict(from, p.button, &rects)
+                }
+                None => gamepad::focus_step_vague(p.from, p.button, &rects),
+            };
+            if let Some(i) = step {
+                self.title_focus_on(event_loop, targets[i]);
+                return;
+            }
+        }
+        if self.menu.nav.pending.is_some() {
+            return;
+        }
+        let Some(focus) = self.menu.nav.focus else {
+            return;
+        };
+        let found = gamepad::refind(focus.rect, &rects, 12.0).map(|i| targets[i]);
+        let Some(focus) = found.or_else(|| super::pad_menu::first_button(targets)) else {
+            return;
+        };
+        self.menu.nav.focus = Some(focus);
+        let at = match self.menu.nav.nudge {
+            Some((rect, x)) if rect == focus.rect => (x, focus.center().1),
+            _ => focus.center(),
+        };
+        if (at.0 - self.menu.cursor.0).abs() > 0.5 || (at.1 - self.menu.cursor.1).abs() > 0.5 {
+            self.title_pointer_to(event_loop, at);
+        }
+    }
+
+    fn title_focus_first(&mut self, event_loop: &ActiveEventLoop, targets: &[Target]) {
+        if let Some(target) = super::pad_menu::first_button(targets) {
+            self.title_focus_on(event_loop, target);
+        }
+    }
+
+    fn title_focus_on(&mut self, event_loop: &ActiveEventLoop, target: Target) {
+        self.menu.nav.focus = Some(target);
+        self.menu.nav.pending = None;
+        self.menu.nav.nudge = None;
+        self.title_pointer_to(event_loop, target.center());
+    }
+
+    fn title_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if let Err(error) = self.menu_event(event_loop, event) {
+            self.error = Some(error);
+            event_loop.exit();
+        }
+    }
+
+    /// A pointer move to `at` (GUI pixels), as the mouse sends it.
+    fn title_pointer_to(&mut self, event_loop: &ActiveEventLoop, at: (f32, f32)) {
+        let batch = HudBatch::new(self.menu_size());
+        self.title_event(event_loop, super::pad_menu::pointer_moved(&batch, at));
+        // Read back what the menu made of it, so a real mouse move shows.
+        self.menu.nav.pos = Some(self.menu.cursor);
+        self.title_show_os_pointer(false);
+    }
+
+    /// A left click at `at`, the pointer staying there.
+    fn title_click(&mut self, event_loop: &ActiveEventLoop, at: (f32, f32)) {
+        self.title_pointer_to(event_loop, at);
+        self.title_event(event_loop, super::pad_menu::pointer_button(false, true));
+        self.title_event(event_loop, super::pad_menu::pointer_button(false, false));
+    }
+
+    fn title_show_os_pointer(&mut self, show: bool) {
+        if self.menu.nav.os_hidden != show {
+            return;
+        }
+        self.menu.nav.os_hidden = !show;
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(show);
+        }
+    }
 }
 
 /// Each generation has its own channel and progress. Pack changes wait for the
@@ -730,6 +1145,17 @@ impl Loading {
                 self.settings.file.bool("hideSplashTexts"),
             );
         }
+        if self.menu.pending.is_none()
+            && self.menu.win.is_none()
+            && self.menu.nav.pos.is_some()
+            && let Some(focus) = self.menu.nav.focus
+        {
+            super::pad_menu::draw_focus(batch, &gui.atlas, focus);
+        }
+        // The game rotates the widget registry in its control poll, which doesn't
+        // run before the handoff: without this the pad finds no targets here.
+        self.menu.nav.frames += 1;
+        widgets::end_frame(self.menu.nav.frames);
     }
 
     pub(super) fn restart_menu_resources(&mut self) -> Result<()> {

@@ -16924,6 +16924,11 @@ impl Loading {
             event_loop.exit();
             return;
         }
+        // The controllers work on the title from its first frame.
+        self.poll_title_pad(event_loop);
+        if self.error.is_some() {
+            return;
+        }
         if let Some(w) = &self.window {
             if self.options.as_ref().is_some_and(|o| o.offscreen) {
                 self.draw();

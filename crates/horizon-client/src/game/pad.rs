@@ -86,6 +86,19 @@ impl Pads {
     pub(super) fn player_replaced(&mut self) {
         self.health.forget();
     }
+
+    /// The startup title's poll, before `Game` exists (`startup_menu.rs`):
+    /// the pads' state and its button edges. Game actions, rumble and the
+    /// virtual pad of `horizon-ctl` start with the game.
+    pub(super) fn poll_title(&mut self, settings: &gamepad::PadSettings) -> Vec<(Button, bool)> {
+        let state = self.read();
+        let edges = self.edges.update(&state, settings.trigger_threshold);
+        if state.active(settings) {
+            self.in_use = true;
+        }
+        self.state = state;
+        edges
+    }
 }
 
 impl Game<'_> {

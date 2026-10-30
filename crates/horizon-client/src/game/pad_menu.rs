@@ -35,12 +35,12 @@ use winit::{
 };
 
 /// D-pad auto-repeat: the first step at once, the next after a pause.
-const REPEAT_DELAY: f32 = 0.35;
-const REPEAT_EVERY: f32 = 0.09;
+pub(super) const REPEAT_DELAY: f32 = 0.35;
+pub(super) const REPEAT_EVERY: f32 = 0.09;
 /// Lines per second the right stick scrolls at full tilt.
-const SCROLL_SPEED: f32 = 12.0;
+pub(super) const SCROLL_SPEED: f32 = 12.0;
 /// How far the stick must lean to step focus.
-const STICK_STEP: f32 = 0.55;
+pub(super) const STICK_STEP: f32 = 0.55;
 /// Scrolls a step may try to reveal the next row of a list.
 const SCROLL_TRIES: u8 = 4;
 
@@ -91,6 +91,113 @@ pub(super) struct MenuCursor {
     osk_dismissed: bool,
 }
 
+impl MenuCursor {
+    /// The startup title's pad state, carried into the game at the handoff so the
+    /// focus stays where it was (`startup_menu.rs`).
+    pub(super) fn carry(&mut self, focus: Option<Target>, pos: Option<(f32, f32)>, os_hidden: bool) {
+        self.focus = focus;
+        self.pos = pos;
+        self.os_hidden = os_hidden;
+    }
+}
+
+/// Every target the last frame registered: its enabled buttons, with the kinds
+/// `widgets::target_as` gave them, and the other targets.
+pub(super) fn widget_targets() -> Vec<Target> {
+    let mut targets: Vec<Target> = widgets::last()
+        .iter()
+        .filter(|w| w.enabled)
+        .map(|w| Target {
+            rect: [w.x, w.y, w.w, w.h],
+            kind: Kind::Button,
+        })
+        .collect();
+    for t in widgets::last_targets() {
+        // A button can be both a labelled button and a target.
+        if let Some(same) = targets.iter_mut().find(|o| o.rect == t.rect) {
+            same.kind = t.kind;
+        } else {
+            targets.push(t);
+        }
+    }
+    targets
+}
+
+/// The targets inside the GUI's `batch`, where focus can land.
+pub(super) fn on_screen(mut targets: Vec<Target>, batch: &HudBatch) -> Vec<Target> {
+    let (w, h) = (batch.width + 0.5, batch.height + 0.5);
+    targets.retain(|t| {
+        let [x, y, tw, th] = t.rect;
+        x >= -0.5 && y >= -0.5 && x + tw <= w && y + th <= h
+    });
+    targets
+}
+
+/// Where focus starts on a screen with no slot to start from: the first
+/// button, else the first target that isn't a tab.
+pub(super) fn first_button(targets: &[Target]) -> Option<Target> {
+    targets
+        .iter()
+        .find(|t| t.kind == Kind::Button)
+        .or_else(|| targets.iter().find(|t| !matches!(t.kind, Kind::Tab(_))))
+        .or(targets.first())
+        .copied()
+}
+
+/// A pointer move to `at` (GUI pixels), as the mouse sends it.
+pub(super) fn pointer_moved(batch: &HudBatch, at: (f32, f32)) -> WindowEvent {
+    let at = (
+        at.0.clamp(0.0, batch.width - 1.0),
+        at.1.clamp(0.0, batch.height - 1.0),
+    );
+    WindowEvent::CursorMoved {
+        device_id: DeviceId::dummy(),
+        position: PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale)),
+    }
+}
+
+/// A mouse button going down or up.
+pub(super) fn pointer_button(right: bool, pressed: bool) -> WindowEvent {
+    WindowEvent::MouseInput {
+        device_id: DeviceId::dummy(),
+        state: if pressed {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        },
+        button: if right {
+            MouseButton::Right
+        } else {
+            MouseButton::Left
+        },
+    }
+}
+
+/// A wheel turn of `x`, `y` lines.
+pub(super) fn wheel(x: f32, y: f32) -> WindowEvent {
+    WindowEvent::MouseWheel {
+        device_id: DeviceId::dummy(),
+        delta: MouseScrollDelta::LineDelta(x, y),
+        phase: TouchPhase::Moved,
+    }
+}
+
+/// The focus highlight, as vanilla's keyboard focus looks: buttons, sliders
+/// and slots already draw their highlighted sprite under the (hidden)
+/// pointer, and list rows and fields get vanilla's white one-pixel outline
+/// (`AbstractSelectionList`'s focused selection, `EditBox`'s highlighted
+/// border).
+pub(super) fn draw_focus(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas, focus: Target) {
+    let [x, y, w, h] = focus.rect;
+    if matches!(focus.kind, Kind::Row | Kind::Field) {
+        let white = rgba(255, 255, 255, 255);
+        batch.fill(atlas, x, y, w, 1.0, white);
+        batch.fill(atlas, x, y + h - 1.0, w, 1.0, white);
+        batch.fill(atlas, x, y, 1.0, h, white);
+        batch.fill(atlas, x + w - 1.0, y, 1.0, h, white);
+    }
+}
+
 impl Game<'_> {
     /// A menu, a screen, the title, a sign or a book is open: the pad drives
     /// it instead of the player.
@@ -116,34 +223,15 @@ impl Game<'_> {
     /// target (sliders, fields, rows, keyboard keys), and the slots
     /// and tabs of inventories (GUI pixels), on screen.
     fn pad_targets(&self) -> Vec<Target> {
-        let mut targets = self.pad_all_targets();
-        if let Some(batch) = self.gui_scale() {
-            let (w, h) = (batch.width + 0.5, batch.height + 0.5);
-            targets.retain(|t| {
-                let [x, y, tw, th] = t.rect;
-                x >= -0.5 && y >= -0.5 && x + tw <= w && y + th <= h
-            });
+        let targets = self.pad_all_targets();
+        match self.gui_scale() {
+            Some(batch) => on_screen(targets, &batch),
+            None => targets,
         }
-        targets
     }
 
     fn pad_all_targets(&self) -> Vec<Target> {
-        let mut targets: Vec<Target> = widgets::last()
-            .iter()
-            .filter(|w| w.enabled)
-            .map(|w| Target {
-                rect: [w.x, w.y, w.w, w.h],
-                kind: Kind::Button,
-            })
-            .collect();
-        for t in widgets::last_targets() {
-            // A button can be both a labelled button and a target.
-            if let Some(same) = targets.iter_mut().find(|o| o.rect == t.rect) {
-                same.kind = t.kind;
-            } else {
-                targets.push(t);
-            }
-        }
+        let mut targets = widget_targets();
         if self.title.is_some() || self.sign_edit.is_some() || self.book.is_some() {
             return targets;
         }
@@ -233,12 +321,7 @@ impl Game<'_> {
                 _ => {}
             }
         }
-        targets
-            .iter()
-            .find(|t| t.kind == Kind::Button)
-            .or_else(|| targets.iter().find(|t| !matches!(t.kind, Kind::Tab(_))))
-            .or(targets.first())
-            .copied()
+        first_button(targets)
     }
 
     /// Send the window a pointer move to `at` (GUI pixels), as the mouse would.
@@ -247,20 +330,7 @@ impl Game<'_> {
             return;
         };
         let id = window.id();
-        let at = (
-            at.0.clamp(0.0, batch.width - 1.0),
-            at.1.clamp(0.0, batch.height - 1.0),
-        );
-        let position =
-            PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale));
-        self.window_event(
-            event_loop,
-            id,
-            WindowEvent::CursorMoved {
-                device_id: DeviceId::dummy(),
-                position,
-            },
-        );
+        self.window_event(event_loop, id, pointer_moved(&batch, at));
         // Read back what the window made of it, so a real mouse move shows.
         self.pad.menu.pos = Some(self.cursor);
     }
@@ -270,25 +340,7 @@ impl Game<'_> {
             return;
         };
         self.pad.menu.held[usize::from(right)] = pressed;
-        let button = if right {
-            MouseButton::Right
-        } else {
-            MouseButton::Left
-        };
-        let state = if pressed {
-            ElementState::Pressed
-        } else {
-            ElementState::Released
-        };
-        self.window_event(
-            event_loop,
-            id,
-            WindowEvent::MouseInput {
-                device_id: DeviceId::dummy(),
-                state,
-                button,
-            },
-        );
+        self.window_event(event_loop, id, pointer_button(right, pressed));
     }
 
     /// A click (press and release) at a point, the pointer staying there.
@@ -302,15 +354,7 @@ impl Game<'_> {
         let Some(id) = self.window.as_ref().map(|w| w.id()) else {
             return;
         };
-        self.window_event(
-            event_loop,
-            id,
-            WindowEvent::MouseWheel {
-                device_id: DeviceId::dummy(),
-                delta: MouseScrollDelta::LineDelta(x, y),
-                phase: TouchPhase::Moved,
-            },
-        );
+        self.window_event(event_loop, id, wheel(x, y));
     }
 
     /// Put the pointer where the pad last left it, or on the first target
@@ -1128,20 +1172,7 @@ impl Game<'_> {
         }
     }
 
-    /// The focus highlight, as vanilla's keyboard focus looks: buttons,
-    /// sliders and slots already draw their highlighted sprite under the
-    /// (hidden) pointer, and list rows and fields get vanilla's white
-    /// one-pixel outline (`AbstractSelectionList`'s focused selection,
-    /// `EditBox`'s highlighted border).
     fn draw_pad_focus(&self, batch: &mut HudBatch, focus: Target) {
-        let [x, y, w, h] = focus.rect;
-        if matches!(focus.kind, Kind::Row | Kind::Field) {
-            let atlas = &self.gui.atlas;
-            let white = rgba(255, 255, 255, 255);
-            batch.fill(atlas, x, y, w, 1.0, white);
-            batch.fill(atlas, x, y + h - 1.0, w, 1.0, white);
-            batch.fill(atlas, x, y, 1.0, h, white);
-            batch.fill(atlas, x + w - 1.0, y, 1.0, h, white);
-        }
+        draw_focus(batch, &self.gui.atlas, focus);
     }
 }
