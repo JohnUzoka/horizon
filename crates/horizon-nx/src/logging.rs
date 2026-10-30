@@ -633,12 +633,6 @@ pub(crate) fn stop_log_writer() {
     }
 }
 
-/// Whether the log writer thread is taking `log.txt`'s writes (`start_log_writer`).
-#[cfg(target_os = "horizon")]
-pub(crate) fn log_writer_running() -> bool {
-    QUEUE_OPEN.load(Ordering::Relaxed)
-}
-
 /// Pushes buffered stdout into `log.txt` and asks the FS service to flush it to the SD card,
 /// waiting for both, with whatever the log writer still had queued written first.
 pub fn flush_switch_logs() {

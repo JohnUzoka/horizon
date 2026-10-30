@@ -20,12 +20,14 @@ pub mod logging;
 mod memory;
 #[cfg(all(target_os = "horizon", feature = "top_down_alloc"))]
 mod allocator;
-#[cfg(target_os = "horizon")]
-mod keyboard;
 #[cfg(all(target_os = "horizon", feature = "vulkan"))]
 pub mod nvk_tune;
 #[cfg(target_os = "horizon")]
 pub mod profiler;
+#[cfg(target_os = "horizon")]
+mod boost;
+#[cfg(target_os = "horizon")]
+mod keyboard;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -79,24 +81,47 @@ pub fn init() {
                 )),
             }
         }
+        check_std_stat();
         // env.txt next to the NRO sets environment variables before anything reads them, so
         // perf knobs (BH_ROBUST_BUFFER_ACCESS, BEVY_HORIZON_CPU_PROFILE,
-        // HORIZON_NX_SWAPCHAIN_IMAGES, BH_ALLOC_CACHE, BEVY_HORIZON_ZCULL_DIR) are testable
-        // without reflashing. `KEY=VALUE` per line, `#` starts a comment, blank lines ignored.
-        // A variable the loader already set wins; each applied line is logged.
+        // HORIZON_NX_SWAPCHAIN_IMAGES, BH_ALLOC_CACHE, BEVY_HORIZON_ZCULL_DIR, HORIZON_NX_CPU_BOOST,
+        // HORIZON_NX_THREAD_CORES, HORIZON_NX_OPEN_STAMPS) are testable without reflashing.
+        // `KEY=VALUE` per line, `#` starts a comment, blank lines ignored. A variable the loader
+        // already set wins; each applied line is logged.
         apply_env_file();
+        // Cores 0-2 for new threads unless HORIZON_NX_THREAD_CORES says otherwise (compat.rs);
+        // before the profiler, so its thread follows the choice too.
+        compat::thread_cores_from_env();
+        // Read-only opens skip libnx's timestamp query unless HORIZON_NX_OPEN_STAMPS=1 (compat.rs).
+        compat::horizon_stubs::open_stamps_from_env();
         // Only with HORIZON_CPU_PROFILE set (profiler.rs).
         profiler::start_from_env();
         // BH_ALLOC_CACHE=0 turns the allocator's small-block cache off.
         #[cfg(feature = "top_down_alloc")]
         allocator::configure_from_env();
-        // ZCULL direction for reversed depth, unless HORIZON_NX_ZCULL_DIR=less (nvk_tune.rs).
+        // ZCULL direction for reversed depth, unless BEVY_HORIZON_ZCULL_DIR=less (nvk_tune.rs).
         #[cfg(feature = "vulkan")]
         nvk_tune::configure_from_env();
         // NVK's Switch WSI reads `bh_wsi_switch_image_count` (compat.rs) when it makes a
         // swapchain; set it from the env before any surface exists.
         #[cfg(feature = "vulkan")]
         compat::horizon_stubs::set_swapchain_images();
+        // The CPU boost for loading, ended once the player is in a world (boost.rs).
+        boost::start_from_env();
+    }
+}
+
+/// std reads `struct stat` through its own libc, which the build must point at the patched one
+/// (devkitA64's newlib layout; `scripts/hx-build-client.sh` moves std's lock onto it). Built
+/// against crates.io's libc (the 3DS's layout) instead, std misreads every `stat`: folders are
+/// not directories and sizes are wrong, so the game can't open its logs, fonts or data (log15).
+/// The working directory is a folder, so std must see one.
+#[cfg(target_os = "horizon")]
+fn check_std_stat() {
+    if !std::fs::metadata(".").is_ok_and(|m| m.is_dir()) {
+        crate::logging::write_log_line(format_args!(
+            "[Boot] ERROR: std does not see the working directory as a folder: its libc doesn't match newlib's `struct stat` (std built against crates.io's libc?). File access will fail"
+        ));
     }
 }
 

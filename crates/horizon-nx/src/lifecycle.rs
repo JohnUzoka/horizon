@@ -224,10 +224,23 @@ pub(crate) fn release_horizon_services() {
     }
     let blocked = crate::memory::check_heap_for_exit("before releasing services");
     run_release_hooks();
-    close_detached_threads();
-    if SOCKETS_UP.swap(false, Ordering::SeqCst) {
+    let running = close_detached_threads();
+    // `socketExit` frees libnx's socket fd table, and libnx's `bsdExit` is not safe against a
+    // concurrent socket call: run 10 crashed when the game's detached Heartbeat thread, still
+    // inside an HTTPS ping, reached `close` after the table was gone - a data abort at far=0x18
+    // in newlib's `_close_r` (nro+0x1aa4fb0: `ldr x2, [table, fd]; ldr x3, [x2, #0x18]` with a
+    // NULL entry), under `ureq::Response::do_from_stream`'s drop. The pinger can block for
+    // minutes, so waiting it out is not an option. With any thread still running, leave the
+    // sockets open instead: their transfer memory keeps 2.2 MiB of the heap locked, the heap
+    // check below fails, and the exit goes through AM, which ends the process and lets the
+    // system reclaim everything - as for any game.
+    if running == 0 && SOCKETS_UP.swap(false, Ordering::SeqCst) {
         unsafe { ffi::socketExit() };
         write_log(b"[Exit] socketExit: done; the socket sessions and our handle to their transfer memory are closed\n");
+    } else if SOCKETS_UP.load(Ordering::SeqCst) {
+        write_log_line(format_args!(
+            "[Exit] socketExit: skipped, {running} detached thread(s) may still be inside a socket call; the sockets stay open and the exit goes through AM\n"
+        ));
     }
     if ROMFS_MOUNTED.swap(false, Ordering::SeqCst) {
         unsafe { ffi::romfsUnmount(c"romfs".as_ptr()) };
@@ -308,12 +321,13 @@ fn release_nvdrv() {
     }
 }
 
-/// Closes the detached threads that have exited, waiting up to 1 s for the rest. std detaches a
-/// thread whose `JoinHandle` is dropped, and until it is closed its stack keeps 2 MiB of the heap
-/// locked (`compat.rs`). `blocking`'s threads, which run Bevy's file reads, are detached and
-/// exit after 500 ms without work.
+/// Closes the detached threads that have exited, waiting up to 1 s for the rest, and returns how
+/// many were still running when it gave up. std detaches a thread whenever its `JoinHandle` is
+/// dropped, and until it is closed its stack keeps 2 MiB of the heap locked (`compat.rs`).
+/// `blocking`'s threads, which run Bevy's file reads, are detached and exit after 500 ms without
+/// work.
 #[cfg(target_os = "horizon")]
-fn close_detached_threads() {
+fn close_detached_threads() -> u32 {
     use crate::logging::write_log_line;
     use std::time::{Duration, Instant};
 
@@ -324,7 +338,8 @@ fn close_detached_threads() {
             "[Exit] detached threads: another thread was closing them for all of {} ms",
             TIMEOUT.as_millis()
         ));
-        return;
+        // Unknown, and the other closer may still be waiting: assume some are running.
+        return 1;
     };
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     write_log_line(format_args!(
@@ -340,12 +355,17 @@ fn close_detached_threads() {
             threads.close_failed_total, threads.untracked_total,
         ));
     }
+    // Untracked ones (detached while all 256 slots were taken) are never closed, so whether they
+    // have exited is unknown: count them as possibly still inside a socket call too.
+    threads.running + threads.untracked_total
 }
 
 /// Handles every applet message waiting, as `appletMainLoop` does for one. False once the system
-/// has asked the app to exit.
+/// has asked the app to exit. The game calls it once a frame, so it also ends the loading CPU
+/// boost at the player's first input (boost.rs).
 #[cfg(target_os = "horizon")]
 pub fn process_applet_messages() -> bool {
+    crate::boost::end_on_input();
     // The bound only stops a frame from spinning if messages kept coming.
     for _ in 0..16 {
         let mut message = 0;
@@ -515,11 +535,22 @@ pub fn flush_logs() {
         heartbeat: Option<Instant>,
         sync: Option<Instant>,
         memory: Option<Instant>,
+        /// wgpu-hal's GPU-work totals and the frame count at the last heartbeat.
+        gpu: [u64; 8],
+        gpu_frame: u64,
     }
 
     thread_local! {
         static BEAT: Cell<Beat> = const {
-            Cell::new(Beat { first: None, frame: 0, heartbeat: None, sync: None, memory: None })
+            Cell::new(Beat {
+                first: None,
+                frame: 0,
+                heartbeat: None,
+                sync: None,
+                memory: None,
+                gpu: [0; 8],
+                gpu_frame: 0,
+            })
         };
     }
 
@@ -560,6 +591,31 @@ pub fn flush_logs() {
                     suspended.as_secs_f64()
                 );
             }
+            // What the game asked the GPU to do per frame since the last beat, to tell geometry
+            // that grows over a session from a GPU that only gets slower at the same work, and
+            // what a frame waited for: the GPU (GPU-bound), a free image (display-bound), or
+            // neither (CPU-bound).
+            #[cfg(feature = "vulkan")]
+            {
+                let work = gpu_work();
+                let frames = b.frame - b.gpu_frame;
+                if frames > 0 {
+                    let per = |i: usize| work[i].saturating_sub(b.gpu[i]) as f64 / frames as f64;
+                    log::info!(
+                        "[GPU work] per frame over the last {frames} frames: {:.1} render passes, {:.0} draws of {:.0}k vertices, {:.1} indirect calls holding {:.0} draws, {:.0} KiB copied; acquire waited {:.1} ms for the GPU and {:.1} ms for an image",
+                        per(0),
+                        per(1),
+                        per(2) / 1000.0,
+                        per(3),
+                        per(4),
+                        per(5) / 1024.0,
+                        per(6) / 1e6,
+                        per(7) / 1e6,
+                    );
+                }
+                b.gpu = work;
+                b.gpu_frame = b.frame;
+            }
             let memory_every = MEMORY_EVERY_SECS.load(core::sync::atomic::Ordering::Relaxed);
             if memory_every > 0 && due(&mut b.memory, Duration::from_secs(memory_every)) {
                 log::info!("[Memory] {}", crate::memory::malloc_report());
@@ -578,4 +634,19 @@ pub fn flush_logs() {
         }
         beat.set(b);
     });
+}
+
+/// wgpu-hal's GPU-work totals (`third_party/wgpu-hal/src/vulkan/horizon_counters.rs`, Horizon
+/// builds): render passes, direct draws, their vertices × instances, indirect calls, the draws
+/// those hold, bytes copied between buffers, and the nanoseconds `acquire` waited for the GPU and
+/// for a free image.
+#[cfg(all(target_os = "horizon", feature = "vulkan"))]
+fn gpu_work() -> [u64; 8] {
+    unsafe extern "C" {
+        static HORIZON_GPU_WORK: [core::sync::atomic::AtomicU64; 8];
+    }
+    // SAFETY: wgpu-hal defines the eight atomics for the process lifetime; relaxed loads only.
+    core::array::from_fn(|i| unsafe {
+        HORIZON_GPU_WORK[i].load(core::sync::atomic::Ordering::Relaxed)
+    })
 }

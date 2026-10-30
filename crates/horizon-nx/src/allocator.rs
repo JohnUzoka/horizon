@@ -16,8 +16,10 @@
 //! goes to the region if one of its runs is free. The `[Memory]` lines count both.
 //!
 //! Blocks of up to 8 KiB, aligned to at most 16 bytes, go through a cache in front of malloc
-//! (small_blocks.rs) unless `BH_ALLOC_CACHE=0`.
+//! (small_blocks.rs) unless `BH_ALLOC_CACHE=0`; blocks between that and [`LARGE`] go through a
+//! second cache (medium_blocks.rs) unless `BH_ALLOC_MEDIUM=0`.
 
+mod medium_blocks;
 mod small_blocks;
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -25,6 +27,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::alloc::System;
 
+use medium_blocks::Cache as MediumCache;
 use small_blocks::{Backend, Cache};
 
 /// Blocks this big and up go to the region. A smaller one would waste more of its last granule.
@@ -87,14 +90,26 @@ impl Backend for Newlib {
 }
 
 static CACHE: Cache<Newlib> = Cache::new();
+/// The medium-block cache's malloc, for blocks between the small cache and the region.
+static MCACHE: MediumCache<Newlib> = MediumCache::new();
 
-/// Reads `BH_ALLOC_CACHE`: `0` turns the small-block cache off, and gives back the blocks it
-/// holds. `HorizonPlugin` calls this once, after the game has set its environment; until then the
-/// cache is on.
+/// Reads `BH_ALLOC_CACHE` and `BH_ALLOC_MEDIUM`: `0` turns the small- and medium-block caches off,
+/// giving back the blocks they hold. `HorizonPlugin` calls this once, after the game has set its
+/// environment; until then both caches are on.
 pub(crate) fn configure_from_env() {
     if std::env::var_os("BH_ALLOC_CACHE").is_some_and(|value| value == "0") {
         CACHE.set_enabled(false);
         log::info!("BH_ALLOC_CACHE=0: the small-block cache is off");
+    }
+    if std::env::var_os("BH_ALLOC_MEDIUM").is_some_and(|value| value == "0") {
+        MCACHE.set_enabled(false);
+        log::info!("BH_ALLOC_MEDIUM=0: the medium-block cache is off");
+    }
+    if let Some(mib) = std::env::var("BH_ALLOC_DEPOT_MIB").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
+        CACHE.set_depot_limit(mib << 20);
+        crate::logging::write_log_line(format_args!(
+            "[Boot] BH_ALLOC_DEPOT_MIB={mib}: the small-block cache's depot keeps up to {mib} MiB\n"
+        ));
     }
 }
 
@@ -118,6 +133,7 @@ pub(crate) struct Figures {
     pub(crate) large_fallbacks: usize,
     pub(crate) small_rescues: usize,
     pub(crate) cache: small_blocks::Stats,
+    pub(crate) medium: medium_blocks::Stats,
 }
 
 pub(crate) fn figures() -> Figures {
@@ -128,6 +144,7 @@ pub(crate) fn figures() -> Figures {
         large_fallbacks: LARGE_FALLBACKS.load(Relaxed),
         small_rescues: SMALL_RESCUES.load(Relaxed),
         cache: CACHE.stats(),
+        medium: MCACHE.stats(),
     }
 }
 
@@ -186,11 +203,17 @@ unsafe fn malloc_alloc(layout: Layout, zeroed: bool) -> *mut u8 {
     ptr
 }
 
-/// `ptr`, or if it's null because malloc ran out, what `again` gives once the cache has given
-/// malloc its blocks.
+/// `ptr`, or if it's null because malloc ran out, what `again` gives once both caches have given
+/// malloc their blocks.
 #[inline]
 fn or_after_drain(ptr: *mut u8, again: impl FnOnce() -> *mut u8) -> *mut u8 {
-    if ptr.is_null() && CACHE.drain() { again() } else { ptr }
+    if ptr.is_null() {
+        let gave = CACHE.drain();
+        if MCACHE.drain() || gave {
+            return again();
+        }
+    }
+    ptr
 }
 
 unsafe fn allocate(layout: Layout, zeroed: bool) -> *mut u8 {
@@ -205,7 +228,16 @@ unsafe fn allocate(layout: Layout, zeroed: bool) -> *mut u8 {
     }
     let small = || match CACHE.class_for(layout.size(), layout.align()) {
         Some(class) => unsafe { CACHE.alloc(class, layout.size(), zeroed) },
-        None => unsafe { malloc_alloc(layout, zeroed) },
+        None => match MCACHE.class_for(layout.size(), layout.align()) {
+            Some(class) => {
+                let ptr = unsafe { MCACHE.alloc(class, layout.size(), zeroed) };
+                if !ptr.is_null() {
+                    count_malloc(layout.size(), true);
+                }
+                ptr
+            }
+            None => unsafe { malloc_alloc(layout, zeroed) },
+        },
     };
     let ptr = or_after_drain(small(), small);
     if !ptr.is_null() {
@@ -230,6 +262,10 @@ unsafe fn deallocate(ptr: *mut u8, layout: Layout) {
     }
     if let Some(class) = CACHE.class_for(layout.size(), layout.align()) {
         return unsafe { CACHE.free(ptr, class) };
+    }
+    if let Some(class) = MCACHE.class_for(layout.size(), layout.align()) {
+        count_malloc(layout.size(), false);
+        return unsafe { MCACHE.free(ptr, class) };
     }
     count_malloc(layout.size(), false);
     unsafe { System.dealloc(ptr, layout) }
@@ -291,18 +327,32 @@ unsafe impl GlobalAlloc for HorizonAllocator {
             return new;
         }
 
-        let (old_class, new_class) = (
+        let (old_small, new_small) = (
             CACHE.class_for(layout.size(), layout.align()),
             CACHE.class_for(new_size, layout.align()),
         );
-        if old_class.is_some() || new_class.is_some() {
+        let (old_medium, new_medium) = (
+            MCACHE.class_for(layout.size(), layout.align()),
+            MCACHE.class_for(new_size, layout.align()),
+        );
+        if old_small.is_some() || new_small.is_some() || old_medium.is_some() || new_medium.is_some() {
             // A block that stays in its class stays put: it was allocated at the class's size,
             // unless the cache was off then.
-            if old_class == new_class && unsafe { CACHE.usable_size(ptr) } >= new_size {
+            if old_small.is_some() && old_small == new_small && unsafe { CACHE.usable_size(ptr) } >= new_size {
                 return ptr;
             }
-            // In or out of the cache's sizes, or to another class: a new block, so that every
-            // block the cache keeps is its class's size.
+            if old_medium.is_some() && old_medium == new_medium && unsafe { MCACHE.usable_size(ptr) } >= new_size {
+                // The block stays live and parked-or-held; only its counted size changes, and only
+                // in the 64-256 KiB band `count_malloc` tracks. `count_malloc` ignores a size under
+                // MEDIUM, so a block that straddles it (both in the 64 KiB class) is handled.
+                if layout.size() >= MEDIUM || new_size >= MEDIUM {
+                    count_malloc(layout.size(), false);
+                    count_malloc(new_size, true);
+                }
+                return ptr;
+            }
+            // In or out of a cache's sizes, or to another class: a new block, so that every block
+            // a cache keeps is its class's size.
             let new = unsafe { allocate(new_layout, false) };
             if new.is_null() {
                 return new;

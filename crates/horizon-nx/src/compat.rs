@@ -14,6 +14,11 @@ use core::sync::atomic::{AtomicBool as CoreAtomicBool, AtomicU8, Ordering as Ato
 /// priority 0x3B (59), lower than the main thread's 0x2C (44), and Horizon never time-slices a
 /// lower-priority thread in while a higher one is runnable on its core: a main thread that spins
 /// waiting for a worker on the same core starves it. See docs/platform-notes.md.
+///
+/// The default is [`AnyCore`](Self::AnyCore). A retail game only ever gets cores 0-2; homebrew
+/// on Atmosphère may use core 3 too, and the HOME menu and the quick-settings overlay run there,
+/// so the game's busy threads (the far-terrain sampler, the loaders) stay off it.
+/// `HORIZON_NX_THREAD_CORES` (`default`, `anycore`, `spread` or `pinned`) picks another at boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThreadCorePolicy {
@@ -52,7 +57,7 @@ impl ThreadCorePolicy {
     }
 }
 
-static THREAD_CORE_POLICY: AtomicU8 = AtomicU8::new(ThreadCorePolicy::Default as u8);
+static THREAD_CORE_POLICY: AtomicU8 = AtomicU8::new(ThreadCorePolicy::AnyCore as u8);
 
 /// Sets the core policy for threads created from now on; threads that already exist keep theirs.
 /// Set it before `App::new()` / `DefaultPlugins` for it to cover Bevy's task pools. Does nothing
@@ -63,6 +68,29 @@ pub fn set_thread_core_policy(policy: ThreadCorePolicy) {
 
 pub fn thread_core_policy() -> ThreadCorePolicy {
     ThreadCorePolicy::from_u8(THREAD_CORE_POLICY.load(AtomicOrdering::SeqCst))
+}
+
+/// Applies `HORIZON_NX_THREAD_CORES` (a policy's name, any case) to the threads created from now
+/// on, and logs what it chose.
+#[cfg(target_os = "horizon")]
+pub(crate) fn thread_cores_from_env() {
+    let Ok(value) = std::env::var("HORIZON_NX_THREAD_CORES") else {
+        return;
+    };
+    let value = value.trim();
+    match ThreadCorePolicy::ALL.into_iter().find(|p| p.name().eq_ignore_ascii_case(value)) {
+        Some(policy) => {
+            set_thread_core_policy(policy);
+            crate::logging::write_log_line(format_args!(
+                "[Boot] HORIZON_NX_THREAD_CORES={value}: new threads get core policy {}",
+                policy.name()
+            ));
+        }
+        None => crate::logging::write_log_line(format_args!(
+            "[Boot] HORIZON_NX_THREAD_CORES={value} is not default, anycore, spread or pinned; new threads keep core policy {}",
+            thread_core_policy().name()
+        )),
+    }
 }
 
 static THREAD_LOGGING: CoreAtomicBool = CoreAtomicBool::new(true);
@@ -279,6 +307,196 @@ pub mod horizon_stubs {
             && unsafe { fsdevGetLastResult() } == FS_RESULT_DIRECTORY_NOT_EMPTY
         {
             unsafe { *__errno() = ENOTEMPTY };
+        }
+        rc
+    }
+
+    unsafe extern "C" {
+        /// libsysbase's `_open_r`, which finds the device and calls its `open_r` (libnx's
+        /// `fsdev_open` for the SD card); `--wrap=_open_r` gives it this name.
+        fn __real__open_r(reent: *mut c_void, path: *const c_char, flags: c_int, mode: c_int)
+        -> c_int;
+        /// libnx's `fsFsGetFileTimeStampRaw`; `--wrap=fsFsGetFileTimeStampRaw` gives it this name.
+        fn __real_fsFsGetFileTimeStampRaw(
+            fs: *mut c_void,
+            path: *const c_char,
+            out: *mut FsTimeStampRaw,
+        ) -> u32;
+    }
+
+    /// libnx `FsTimeStampRaw` (`switch/services/fs.h`).
+    #[repr(C)]
+    pub struct FsTimeStampRaw {
+        created: u64,
+        modified: u64,
+        accessed: u64,
+        is_valid: u8,
+        padding: [u8; 7],
+    }
+
+    /// newlib's `O_ACCMODE` and `O_RDONLY`.
+    const O_ACCMODE: c_int = 3;
+    const O_RDONLY: c_int = 0;
+
+    /// Read-only opens skip the timestamp query unless `HORIZON_NX_OPEN_STAMPS=1`.
+    static SKIP_OPEN_STAMPS: AtomicBool = AtomicBool::new(true);
+
+    /// Threads inside a read-only `_open_r`, by their local region (`tpidrro_el0`, which the
+    /// kernel sets for every thread: Rust's thread-locals aren't ready yet when `userAppInit`
+    /// opens log.txt). 0 is a free slot; with all of them taken, an open asks as before.
+    static READ_ONLY_OPENS: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+
+    fn local_region() -> usize {
+        let tlr: usize;
+        // SAFETY: reads this thread's read-only system register.
+        unsafe {
+            asm!("mrs {}, tpidrro_el0", out(reg) tlr, options(nomem, nostack, preserves_flags))
+        };
+        tlr
+    }
+
+    /// O13. libnx's `fsdev_open` asks the file system for the file's three timestamps on every
+    /// open (`fsFsGetFileTimeStampRaw`, an IPC of its own), only so that a later `fstat` on the
+    /// handle can report them. On the SD card that query costs more than the open itself
+    /// (profile17b: 60 s of thread waits in it, 13.8 s of them on the startup loader), and no
+    /// reader of a read-only handle wants the times: the game's one `File::metadata().modified()`
+    /// (horizon-client `logging.rs`, on `latest.log`) is on a read-write handle, and every other
+    /// time it reads comes from `std::fs::metadata(path)`, which is `fsdev_stat` and still asks.
+    /// The target spec links with `--wrap=_open_r` and `--wrap=fsFsGetFileTimeStampRaw`: a
+    /// read-only open marks its thread, and the query made under it answers "no timestamps"
+    /// (`is_valid` 0) without the IPC, so `fstat` on such a handle reports zero times.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __wrap__open_r(
+        reent: *mut c_void,
+        path: *const c_char,
+        flags: c_int,
+        mode: c_int,
+    ) -> c_int {
+        let marked = (flags & O_ACCMODE == O_RDONLY && SKIP_OPEN_STAMPS.load(Ordering::Relaxed))
+            .then(local_region)
+            .and_then(|me| {
+                READ_ONLY_OPENS.iter().find(|slot| {
+                    slot.compare_exchange(0, me, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+                })
+            });
+        let fd = unsafe { __real__open_r(reent, path, flags, mode) };
+        if let Some(slot) = marked {
+            slot.store(0, Ordering::Relaxed);
+        }
+        fd
+    }
+
+    /// See `__wrap__open_r`.
+    #[allow(non_snake_case)]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __wrap_fsFsGetFileTimeStampRaw(
+        fs: *mut c_void,
+        path: *const c_char,
+        out: *mut FsTimeStampRaw,
+    ) -> u32 {
+        let me = local_region();
+        if READ_ONLY_OPENS.iter().any(|slot| slot.load(Ordering::Relaxed) == me) {
+            let none = FsTimeStampRaw {
+                created: 0,
+                modified: 0,
+                accessed: 0,
+                is_valid: 0,
+                padding: [0; 7],
+            };
+            // SAFETY: `fsdev_open` passes the record in its file struct for us to fill.
+            unsafe { out.write(none) };
+            return 0;
+        }
+        unsafe { __real_fsFsGetFileTimeStampRaw(fs, path, out) }
+    }
+
+    /// `HORIZON_NX_OPEN_STAMPS=1` makes every open ask for timestamps again, to compare; logs
+    /// which way opens go.
+    pub(crate) fn open_stamps_from_env() {
+        let ask = std::env::var("HORIZON_NX_OPEN_STAMPS").is_ok_and(|value| value.trim() == "1");
+        SKIP_OPEN_STAMPS.store(!ask, Ordering::Relaxed);
+        if ask {
+            crate::logging::write_log_line(format_args!(
+                "[Boot] HORIZON_NX_OPEN_STAMPS=1: every file open asks for the file's timestamps, as libnx does"
+            ));
+        } else {
+            crate::logging::write_log_line(format_args!(
+                "[Boot] read-only file opens skip libnx's timestamp query (O13; HORIZON_NX_OPEN_STAMPS=1 asks again)"
+            ));
+        }
+    }
+
+    unsafe extern "C" {
+        /// libnx's `fsFileWrite` and `fsFileSetSize`; the `--wrap=` pair gives them these names.
+        fn __real_fsFileWrite(
+            f: *mut c_void,
+            off: i64,
+            buf: *const c_void,
+            len: u64,
+            option: u32,
+        ) -> u32;
+        fn __real_fsFileSetSize(f: *mut c_void, size: i64) -> u32;
+        fn fsFileGetSize(f: *mut c_void, out: *mut i64) -> u32;
+    }
+
+    /// What a gap in a file is filled with, 64 KiB at a time.
+    static ZEROS: [u8; 64 << 10] = [0; 64 << 10];
+
+    /// Writes zeros over `from..to` of `f`, which already ends at `from` or later.
+    unsafe fn zero_fill(f: *mut c_void, from: i64, to: i64) -> u32 {
+        let mut at = from;
+        while at < to {
+            let n = (to - at).min(ZEROS.len() as i64);
+            let rc = unsafe { __real_fsFileWrite(f, at, ZEROS.as_ptr().cast(), n as u64, 0) };
+            if rc != 0 {
+                return rc;
+            }
+            at += n;
+        }
+        0
+    }
+
+    /// POSIX: a write past the end of a file, or `ftruncate` growing it, leaves the gap reading
+    /// as zeros. Horizon's SD-card file system doesn't clear the clusters it adds to a file, so
+    /// the gap keeps whatever they held before: pieces of deleted files. The game's region
+    /// files depend on it (horizon-world `region.rs` `write`: a new region's first chunk goes to
+    /// sector 2, and only that chunk's header entry is written), so every region created on the
+    /// Switch had an 8 KiB header of stale data — old NRO code and resource JSON in the user's
+    /// worlds (2026-10-30) — whose garbage entries point the loader at other chunks' sectors, past
+    /// the end of the file, or into nothing; a world whose player stands near them never loads.
+    /// The target spec links with `--wrap=fsFileWrite` and `--wrap=fsFileSetSize` (libnx's
+    /// `fsdev_write` and `fsdev_ftruncate` call them): a write that starts past the end writes
+    /// zeros up to its start first, and a size that grows the file zeros what it adds.
+    #[allow(non_snake_case)]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __wrap_fsFileWrite(
+        f: *mut c_void,
+        off: i64,
+        buf: *const c_void,
+        len: u64,
+        option: u32,
+    ) -> u32 {
+        if off > 0 {
+            let mut size = 0;
+            if unsafe { fsFileGetSize(f, &mut size) } == 0 && off > size {
+                let rc = unsafe { zero_fill(f, size, off) };
+                if rc != 0 {
+                    return rc;
+                }
+            }
+        }
+        unsafe { __real_fsFileWrite(f, off, buf, len, option) }
+    }
+
+    /// See `__wrap_fsFileWrite`.
+    #[allow(non_snake_case)]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __wrap_fsFileSetSize(f: *mut c_void, size: i64) -> u32 {
+        let mut old = 0;
+        let known = unsafe { fsFileGetSize(f, &mut old) } == 0;
+        let rc = unsafe { __real_fsFileSetSize(f, size) };
+        if rc == 0 && known && size > old {
+            return unsafe { zero_fill(f, old, size) };
         }
         rc
     }

@@ -70,8 +70,12 @@ const MAX_WALK: usize = 256;
 /// Without a frame record, the stack above SP is scanned this far for return addresses.
 const SCAN_BYTES: u64 = 2048;
 const SCAN_FRAMES: usize = 8;
-/// Distinct chains kept, over all threads; past it, a new chain is kept as its PC alone.
+/// Distinct chains kept, over all threads; past it, a new chain is kept as its leaf end
+/// (`CAPPED_FRAMES`), and past `MAX_CHAINS` of those as well, as its PC alone.
 const MAX_CHAINS: usize = 40_000;
+/// Frames a chain keeps past `MAX_CHAINS`: enough for the symbolizer's `--callers` to name what
+/// called an allocator (a long session fills the table while loading, before play).
+const CAPPED_FRAMES: usize = 8;
 
 /// Chain flags (element 0).
 const FLAG_WAITING: u32 = 1;
@@ -183,6 +187,8 @@ struct Profile {
     /// Threads that exited while paused for a sample, so had nothing to resume.
     exited_while_paused: u64,
     chains: usize,
+    /// Chains kept as their leaf end since `chains` reached `MAX_CHAINS`.
+    leaf_chains: usize,
     capped: u64,
     /// By thread handle.
     threads: BTreeMap<u32, ThreadProfile>,
@@ -198,6 +204,7 @@ impl Profile {
             resume_failures: 0,
             exited_while_paused: 0,
             chains: 0,
+            leaf_chains: 0,
             capped: 0,
             threads: BTreeMap::new(),
         }
@@ -228,8 +235,19 @@ impl Profile {
             self.chains += 1;
         } else {
             self.capped += 1;
-            let short = [chain[0] & FLAG_WAITING | FLAG_CAPPED, chain[1]];
-            *thread.chains.entry(short[..].into()).or_insert(0) += 1;
+            let keep = chain.len().min(1 + CAPPED_FRAMES);
+            let mut leaf = [0u32; 1 + CAPPED_FRAMES];
+            leaf[0] = chain[0] & (FLAG_WAITING | FLAG_LR | FLAG_SCANNED) | FLAG_CAPPED;
+            leaf[1..keep].copy_from_slice(&chain[1..keep]);
+            if let Some(count) = thread.chains.get_mut(&leaf[..keep]) {
+                *count += 1;
+            } else if self.leaf_chains < MAX_CHAINS {
+                thread.chains.insert(leaf[..keep].into(), 1);
+                self.leaf_chains += 1;
+            } else {
+                let short = [chain[0] & FLAG_WAITING | FLAG_CAPPED, chain[1]];
+                *thread.chains.entry(short[..].into()).or_insert(0) += 1;
+            }
         }
     }
 }

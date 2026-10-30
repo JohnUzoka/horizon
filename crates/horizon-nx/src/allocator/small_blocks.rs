@@ -18,9 +18,9 @@
 //! go of it.
 //!
 //! A cached block is a malloc block of its class's size, so malloc counts it as in use, and it can
-//! always go back to `free`. The most the cache holds is about 3.4 MiB in the shards and 0.85 MiB
-//! in the depot; [`Stats::cached`] says how much it does. When malloc runs out, the allocator
-//! gives it the cache's blocks ([`Cache::drain`]) and asks again.
+//! always go back to `free`. The shards hold about 3.4 MiB at most and the depot up to
+//! [`DEPOT_BYTES`] (`BH_ALLOC_DEPOT_MIB`); [`Stats::cached`] says how much the cache holds. When
+//! malloc runs out, the allocator gives it the cache's blocks ([`Cache::drain`]) and asks again.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -42,8 +42,13 @@ pub(crate) const SHARDS: usize = 8;
 const MAGAZINE_BYTES: usize = 8 << 10;
 const MIN_MAGAZINE: usize = 2;
 const MAX_MAGAZINE: usize = 32;
-/// Full magazines the depot keeps per class.
-const DEPOT_MAGAZINES: usize = 4;
+/// The most the depot keeps, in bytes, across all classes. A thread that frees a big structure
+/// fills magazines faster than its shard can hold them; past this limit each further magazine's
+/// blocks go back to newlib's `free` one at a time, which sorts every block into its bin (log14:
+/// `Behaviours::load` dropping a JSON tree spent 95% of 188 s there). Parked magazines serve the
+/// class's next allocations, and malloc running out gets them all back (`drain`).
+/// `BH_ALLOC_DEPOT_MIB` sets it at boot; 0 parks nothing.
+pub(crate) const DEPOT_BYTES: usize = 128 << 20;
 
 /// Where blocks come from and go back to: newlib's malloc on the Switch.
 pub(crate) trait Backend {
@@ -198,7 +203,7 @@ impl DepotSlot {
 }
 
 /// A held flag, let go when dropped.
-struct Held<'a>(&'a AtomicBool);
+pub(crate) struct Held<'a>(&'a AtomicBool);
 
 impl Drop for Held<'_> {
     #[inline]
@@ -208,7 +213,7 @@ impl Drop for Held<'_> {
 }
 
 #[inline]
-fn try_hold(flag: &AtomicBool) -> Option<Held<'_>> {
+pub(crate) fn try_hold(flag: &AtomicBool) -> Option<Held<'_>> {
     // Looking first leaves a held flag's cache line shared instead of taking it from the holder.
     if flag.load(Ordering::Relaxed) {
         return None;
@@ -218,7 +223,7 @@ fn try_hold(flag: &AtomicBool) -> Option<Held<'_>> {
 
 /// For turning the cache off, where waiting is fine: sleeping, unlike yielding, lets a
 /// lower-priority holder run. Gives up after about 10 ms.
-fn hold_patiently(flag: &AtomicBool) -> Option<Held<'_>> {
+pub(crate) fn hold_patiently(flag: &AtomicBool) -> Option<Held<'_>> {
     for _ in 0..100 {
         if let Some(held) = try_hold(flag) {
             return Some(held);
@@ -265,6 +270,9 @@ pub(crate) struct Cache<B> {
     enabled: AtomicBool,
     shards: [Shard; SHARDS],
     depot: [DepotSlot; CLASSES],
+    /// Bytes in the depot's magazines, and the most it may hold ([`DEPOT_BYTES`] unless set).
+    depot_bytes: AtomicUsize,
+    depot_limit: AtomicUsize,
     busy_allocs: AtomicUsize,
     busy_frees: AtomicUsize,
     rejected: AtomicUsize,
@@ -285,6 +293,8 @@ impl<B: Backend> Cache<B> {
             enabled: AtomicBool::new(true),
             shards: [const { Shard::new() }; SHARDS],
             depot: [const { DepotSlot::new() }; CLASSES],
+            depot_bytes: AtomicUsize::new(0),
+            depot_limit: AtomicUsize::new(DEPOT_BYTES),
             busy_allocs: AtomicUsize::new(0),
             busy_frees: AtomicUsize::new(0),
             rejected: AtomicUsize::new(0),
@@ -445,6 +455,7 @@ impl<B: Backend> Cache<B> {
         if !magazine.is_null() {
             *head = unsafe { next_magazine(magazine) };
             sub(&slot.len, 1);
+            sub(&self.depot_bytes, LENS[class] * SIZES[class]);
             self.refills.fetch_add(1, Ordering::Relaxed);
         }
         magazine
@@ -456,7 +467,8 @@ impl<B: Backend> Cache<B> {
         let Some(_held) = try_hold(&slot.locked) else {
             return false;
         };
-        if slot.len.load(Ordering::Relaxed) >= DEPOT_MAGAZINES {
+        let bytes = LENS[class] * SIZES[class];
+        if self.depot_bytes.load(Ordering::Relaxed) + bytes > self.depot_limit.load(Ordering::Relaxed) {
             return false;
         }
         // SAFETY: the slot is held.
@@ -464,6 +476,7 @@ impl<B: Backend> Cache<B> {
         unsafe { set_next_magazine(magazine, *head) };
         *head = magazine;
         add(&slot.len, 1);
+        add(&self.depot_bytes, bytes);
         true
     }
 
@@ -486,6 +499,12 @@ impl<B: Backend> Cache<B> {
         if self.enabled.swap(enabled, Ordering::SeqCst) && !enabled {
             self.empty();
         }
+    }
+
+    /// Sets the most the depot keeps, in bytes (`BH_ALLOC_DEPOT_MIB`). Magazines already parked
+    /// stay until taken or drained.
+    pub(crate) fn set_depot_limit(&self, bytes: usize) {
+        self.depot_limit.store(bytes, Ordering::Relaxed);
     }
 
     /// For when malloc has run out: gives it the cache's blocks, except any in a shard or depot
@@ -519,7 +538,7 @@ impl<B: Backend> Cache<B> {
             }
             shard.cached.store(0, Ordering::Relaxed);
         }
-        for slot in &self.depot {
+        for (class, slot) in self.depot.iter().enumerate() {
             let Some(_held) = hold_patiently(&slot.locked) else {
                 continue;
             };
@@ -530,6 +549,7 @@ impl<B: Backend> Cache<B> {
                 let magazine = *head;
                 *head = unsafe { next_magazine(magazine) };
                 unsafe { Self::free_list(magazine) };
+                sub(&self.depot_bytes, LENS[class] * SIZES[class]);
             }
             slot.len.store(0, Ordering::Relaxed);
         }
@@ -586,12 +606,5 @@ mod tests {
             assert_eq!(class_size(class) % MAX_ALIGN, 0);
             assert!((MIN_MAGAZINE..=MAX_MAGAZINE).contains(&magazine_len(class)));
         }
-    }
-
-    #[test]
-    fn most_it_holds() {
-        let shards: usize = (0..CLASSES).map(|c| 2 * magazine_len(c) * class_size(c)).sum::<usize>() * SHARDS;
-        let depot: usize = (0..CLASSES).map(|c| DEPOT_MAGAZINES * magazine_len(c) * class_size(c)).sum();
-        println!("shards {:.2} MiB, depot {:.2} MiB", shards as f64 / 1048576.0, depot as f64 / 1048576.0);
     }
 }

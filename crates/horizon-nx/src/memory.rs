@@ -344,6 +344,26 @@ impl core::fmt::Display for MallocFigures {
             } else {
                 write!(f, "; the small-block cache is off (BH_ALLOC_CACHE=0)")?;
             }
+            let medium = &rust.medium;
+            if medium.enabled {
+                write!(
+                    f,
+                    "; the medium-block cache holds {:.1} MiB; of the allocations it takes, it served \
+                     {} and malloc {} ({} with the cache busy), and of the frees, {} went to malloc \
+                     with the cache busy or over budget and {} for blocks under their class's size",
+                    mib(medium.cached as u64),
+                    medium.hits,
+                    medium.misses + medium.busy_allocs,
+                    medium.busy_allocs,
+                    medium.busy_frees,
+                    medium.rejected,
+                )?;
+                if medium.drains > 0 {
+                    write!(f, "; malloc ran out {} times, and took back the medium cache's blocks", medium.drains)?;
+                }
+            } else {
+                write!(f, "; the medium-block cache is off (BH_ALLOC_MEDIUM=0)")?;
+            }
         }
         Ok(())
     }
