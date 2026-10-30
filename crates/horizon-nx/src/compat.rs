@@ -205,6 +205,71 @@ pub mod horizon_stubs {
     }
 
     unsafe extern "C" {
+        /// libnx's `fcntl` (`runtime/devices/socket.c`); `--wrap=fcntl` gives it this name.
+        fn __real_fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+        /// libsysbase's `dup`: the lowest free descriptor, sharing the old one's handle and
+        /// counting it (`refcount`); `close` frees a slot and closes the device (for a socket,
+        /// `bsdClose`) only with the last one.
+        fn dup(fd: c_int) -> c_int;
+        fn close(fd: c_int) -> c_int;
+    }
+
+    /// newlib's `fcntl` commands that duplicate (`sys/_default_fcntl.h`).
+    const F_DUPFD: c_int = 0;
+    const F_DUPFD_CLOEXEC: c_int = 14;
+    /// newlib's `EINVAL`.
+    const EINVAL: c_int = 22;
+
+    /// libnx replaces newlib's `fcntl` with its socket driver's, which takes only `F_GETFL` and
+    /// `F_SETFL` and *returns* `EOPNOTSUPP` (95) for any other command instead of failing with
+    /// it. std's `try_clone` (`TcpStream`, `File`) duplicates with `fcntl(fd, F_DUPFD_CLOEXEC, 3)`
+    /// and took that 95 for the new descriptor, so a connection's writer wrote to a descriptor
+    /// that doesn't exist and multiplayer ended in "Bad file number" (log21c). The target spec
+    /// links with `--wrap=fcntl`, which sends calls here: duplicating goes to libsysbase's `dup`
+    /// (the copy shares the socket, which stays open until its last descriptor closes; there is
+    /// no exec, so close-on-exec needs nothing), everything else to libnx as before.
+    ///
+    /// `arg` is the raw third argument: on AArch64 (AAPCS64, non-Apple) a variadic argument comes
+    /// in the same register as a fixed one, and it goes on whole, as some commands pass a pointer.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __wrap_fcntl(fd: c_int, cmd: c_int, arg: usize) -> c_int {
+        match cmd {
+            F_DUPFD | F_DUPFD_CLOEXEC => unsafe { dup_at_least(fd, arg as c_int) },
+            _ => unsafe { __real_fcntl(fd, cmd, arg) },
+        }
+    }
+
+    /// `F_DUPFD`: the lowest free descriptor at or above `min`. `dup` gives the lowest free one,
+    /// so ones below `min` (a free stdio slot) are held until a copy lands at or above it, then
+    /// closed again; they share the handle, so that frees only their slots.
+    unsafe fn dup_at_least(fd: c_int, min: c_int) -> c_int {
+        if min < 0 {
+            unsafe { *__errno() = EINVAL };
+            return -1;
+        }
+        let mut held = [0 as c_int; 8];
+        let mut count = 0;
+        let new = loop {
+            let new = unsafe { dup(fd) };
+            if new < 0 || new >= min {
+                break new;
+            }
+            if count == held.len() {
+                unsafe { close(new) };
+                unsafe { *__errno() = EINVAL };
+                break -1;
+            }
+            held[count] = new;
+            count += 1;
+        };
+        // Closing a shared handle's extra slot only counts it down, which leaves errno alone.
+        for &slot in &held[..count] {
+            unsafe { close(slot) };
+        }
+        new
+    }
+
+    unsafe extern "C" {
         /// newlib's per-thread `struct _reent`, which holds `errno`.
         fn __getreent() -> *mut c_void;
         /// libsysbase's rename, which calls the device's (libnx `fsdev_rename`).
