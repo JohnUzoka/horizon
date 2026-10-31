@@ -27,6 +27,8 @@ pub mod profiler;
 #[cfg(target_os = "horizon")]
 mod boost;
 #[cfg(target_os = "horizon")]
+mod clocks;
+#[cfg(target_os = "horizon")]
 mod keyboard;
 
 pub use compat::{
@@ -87,7 +89,8 @@ pub fn init() {
         // env.txt next to the NRO sets environment variables before anything reads them, so
         // perf knobs (BH_ROBUST_BUFFER_ACCESS, BEVY_HORIZON_CPU_PROFILE,
         // HORIZON_NX_SWAPCHAIN_IMAGES, BH_ALLOC_CACHE, BEVY_HORIZON_ZCULL_DIR, HORIZON_NX_CPU_BOOST,
-        // HORIZON_NX_THREAD_CORES, HORIZON_NX_OPEN_STAMPS) are testable without reflashing.
+        // HORIZON_NX_THREAD_CORES, HORIZON_NX_OPEN_STAMPS, HORIZON_NX_GPU_CLOCKS) are testable without
+        // reflashing.
         // `KEY=VALUE` per line, `#` starts a comment, blank lines ignored. A variable the loader
         // already set wins; each applied line is logged.
         apply_env_file();
@@ -108,6 +111,9 @@ pub fn init() {
         // swapchain; set it from the env before any surface exists.
         #[cfg(feature = "vulkan")]
         compat::horizon_stubs::set_swapchain_images();
+        // The clocks into the log, and HORIZON_NX_GPU_CLOCKS's faster ones for a diagnostic run
+        // (clocks.rs), before the boost stands in for them.
+        clocks::start_from_env();
         // The CPU boost for loading, ended once the player is in a world (boost.rs).
         boost::start_from_env();
     }

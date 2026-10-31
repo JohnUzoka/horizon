@@ -375,6 +375,11 @@ pub fn process_applet_messages() -> bool {
         if !unsafe { ffi::appletProcessMessage(message) } {
             return false;
         }
+        // libnx AppletMessage_OperationModeChanged (30) and _PerformanceModeChanged (31): docked
+        // or not, so other clocks (clocks.rs).
+        if message == 30 || message == 31 {
+            crate::clocks::log_clocks("the system changed the mode");
+        }
     }
     true
 }
