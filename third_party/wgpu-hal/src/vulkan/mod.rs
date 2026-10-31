@@ -37,6 +37,8 @@ mod swapchain;
 #[cfg(target_os = "horizon")]
 mod horizon_counters;
 #[cfg(target_os = "horizon")]
+mod horizon_pass_times;
+#[cfg(target_os = "horizon")]
 mod horizon_alloc;
 
 pub use adapter::PhysicalDeviceFeatures;
@@ -1390,6 +1392,10 @@ impl crate::Queue for Queue {
         surface_textures: &[&SurfaceTexture],
         (signal_fence, signal_value): (&Fence, crate::FenceValue),
     ) -> Result<(), crate::DeviceError> {
+        #[cfg(target_os = "horizon")]
+        if horizon_pass_times::enabled() {
+            horizon_pass_times::harvest();
+        }
         let mut fence_raw = vk::Fence::null();
 
         let mut wait_semaphores = SemaphoreList::new(SemaphoreListMode::Wait);

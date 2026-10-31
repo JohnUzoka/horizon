@@ -612,6 +612,9 @@ pub fn flush_logs() {
                         per(6) / 1e6,
                         per(7) / 1e6,
                     );
+                    if let Some(passes) = gpu_passes(frames) {
+                        log::info!("[GPU passes] {passes}");
+                    }
                 }
                 b.gpu = work;
                 b.gpu_frame = b.frame;
@@ -649,4 +652,17 @@ fn gpu_work() -> [u64; 8] {
     core::array::from_fn(|i| unsafe {
         HORIZON_GPU_WORK[i].load(core::sync::atomic::Ordering::Relaxed)
     })
+}
+
+/// wgpu-hal's per-pass GPU times since the last call, per frame over `frames` frames
+/// (`third_party/wgpu-hal/src/vulkan/horizon_pass_times.rs`), when `BH_GPU_PASS_TIMES=1`.
+#[cfg(all(target_os = "horizon", feature = "vulkan"))]
+fn gpu_passes(frames: u64) -> Option<String> {
+    unsafe extern "C" {
+        fn horizon_gpu_pass_report(buf: *mut u8, cap: usize, frames: u64) -> usize;
+    }
+    let mut buf = vec![0u8; 2048];
+    // SAFETY: wgpu-hal writes at most `buf.len()` bytes into `buf` and returns how many.
+    let n = unsafe { horizon_gpu_pass_report(buf.as_mut_ptr(), buf.len(), frames) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n]).into_owned())
 }

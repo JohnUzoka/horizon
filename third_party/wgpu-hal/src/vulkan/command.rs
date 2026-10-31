@@ -147,6 +147,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
         unsafe { self.device.raw.begin_command_buffer(raw, &vk_info) }
             .map_err(super::map_host_device_oom_err)?;
         self.active = raw;
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::begin_encoding(
+                &self.device.raw,
+                self.device.timestamp_period,
+                raw,
+            );
+        }
 
         Ok(())
     }
@@ -154,6 +162,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
     unsafe fn end_encoding(&mut self) -> Result<super::CommandBuffer, crate::DeviceError> {
         let raw = self.active;
         self.active = vk::CommandBuffer::null();
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::end_encoding(raw);
+        }
         unsafe { self.device.raw.end_command_buffer(raw) }.map_err(map_err)?;
         fn map_err(err: vk::Result) -> crate::DeviceError {
             // We don't use VK_KHR_video_encode_queue
@@ -170,6 +182,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         assert_ne!(self.active, vk::CommandBuffer::null());
 
         self.discarded.push(self.active);
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::discard(self.active);
+        }
         self.active = vk::CommandBuffer::null();
     }
 
@@ -789,6 +805,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
     ) -> Result<(), crate::DeviceError> {
         #[cfg(target_os = "horizon")]
         super::horizon_counters::pass();
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_begin(&self.device.raw, self.active, desc.label);
+        }
         let mut vk_clear_values =
             ArrayVec::<vk::ClearValue, { super::MAX_TOTAL_ATTACHMENTS }>::new();
         let mut rp_key = super::RenderPassKey {
@@ -911,14 +931,26 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 vk::SubpassContents::INLINE,
             );
         };
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_started(&self.device.raw, self.active);
+        }
 
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
 
         Ok(())
     }
     unsafe fn end_render_pass(&mut self) {
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_ending(&self.device.raw, self.active);
+        }
         unsafe {
             self.device.raw.cmd_end_render_pass(self.active);
+        }
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_end(&self.device.raw, self.active);
         }
 
         // After all other commands but before debug marker, so this is still seen as part of this pass.
@@ -1324,6 +1356,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         desc: &crate::ComputePassDescriptor<'_, super::QuerySet>,
     ) {
         self.bind_point = vk::PipelineBindPoint::COMPUTE;
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_begin(&self.device.raw, self.active, desc.label);
+            super::horizon_pass_times::pass_started(&self.device.raw, self.active);
+        }
         if let Some(label) = desc.label {
             unsafe { self.begin_debug_marker(label) };
             self.rpass_debug_marker_active = true;
@@ -1341,6 +1378,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         }
     }
     unsafe fn end_compute_pass(&mut self) {
+        #[cfg(target_os = "horizon")]
+        if super::horizon_pass_times::enabled() {
+            super::horizon_pass_times::pass_ending(&self.device.raw, self.active);
+            super::horizon_pass_times::pass_end(&self.device.raw, self.active);
+        }
         self.write_pass_end_timestamp_if_requested();
 
         if self.rpass_debug_marker_active {
