@@ -6,9 +6,7 @@ license.workspace = true
 rust-version = "1.85"
 description = "Scheduling hints for the game's threads and its allocator: the OS calls the crates that forbid unsafe code can't make"
 
-# The Switch (Horizon) build keeps horizon-nx's allocator: mimalloc's OS layer needs mmap,
-# which libnx doesn't have.
-[target.'cfg(not(target_os = "horizon"))'.dependencies]
+[dependencies]
 mimalloc = { version = "0.1.52", default-features = false }
 libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
 

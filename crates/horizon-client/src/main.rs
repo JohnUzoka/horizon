@@ -4,8 +4,9 @@ mod game;
 
 use horizon_client::{crash, logging};
 
-// The Switch build's allocator is horizon-nx's (its `allocator.rs`), which declares itself.
-#[cfg(not(target_os = "horizon"))]
+// The Switch build uses mimalloc too, unless built with `nx-allocator`: then horizon-nx's
+// allocator (its `allocator.rs`) is the global one and declares itself.
+#[cfg(not(all(target_os = "horizon", feature = "nx-allocator")))]
 #[global_allocator]
 static ALLOCATOR: horizon_threads::Allocator = horizon_threads::Allocator;
 

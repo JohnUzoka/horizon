@@ -103,6 +103,9 @@ audio = ["horizon-client-render/audio"]
 controllers = ["dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/controllers"]
 # Records the call sites of mob random draws (`mob_ai_probe` traces).
 rng-trace = ["horizon-core/rng-trace"]
+# Switch: horizon-nx's allocator (caches in front of newlib's malloc, and the top-down region) as
+# the global allocator instead of mimalloc.
+nx-allocator = ["horizon-nx/top_down_alloc"]
 
 # Its own name, not `probe`: Cargo copies every crate's examples into one target/<profile>/examples.
 [[example]]
