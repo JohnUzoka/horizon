@@ -147,6 +147,10 @@ the crafting result, armour to the player's grid.
   quick-moves, View and the left stick click throw.
 - **Where focus lands** when a screen opens: the held hotbar slot in an
   inventory, else the first button.
+- **In bed** (`InBedChatScreen`): focus starts on Leave Bed, and up/down
+  step between it and the chat box under it. A on Leave Bed or B (Escape)
+  gets out of bed; A on the chat box opens the keyboard, which doesn't open
+  by itself there.
 
 It looks as vanilla's own keyboard focus does: buttons, sliders and slots
 show their highlighted sprite (`isHoveredOrFocused`, drawn because the hidden
@@ -185,7 +189,8 @@ Steam + X opens it at any time. On a Switch, A opens the Switch's own keyboard
 (the system applet, `horizon_nx::software_keyboard`): it takes the screen
 until OK or cancel, starting from the field's text, which its text then
 replaces (a book page and the options' boxes start empty and get it typed in);
-OK on chat sends it, cancel closes chat.
+OK on chat sends it, cancel closes chat (in bed, cancel leaves the bed's chat
+open, the player still asleep).
 "On-Screen Keyboard: Auto / Horizon / Steam" (`keyboard:`) picks one; Auto is
 Steam's on a Steam Deck, the Switch's on a Switch, else Horizon's.
 

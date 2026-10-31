@@ -939,14 +939,16 @@ impl Game<'_> {
     /// player confirms or cancels. It starts from the focused field's text and
     /// what comes back replaces it (a book page, the options' and the world
     /// options' boxes start empty and get it typed in); confirming chat sends
-    /// it, cancelling chat closes it, as chat was opened only to type.
+    /// it, cancelling chat closes it, as chat was opened only to type. The
+    /// sleeper's chat (`InBedChatScreen`) stays on cancel: closing it would get
+    /// the player out of bed, which is Leave Bed's and B's job.
     #[cfg(target_os = "horizon")]
     fn pad_switch_keyboard(&mut self) {
         let chat = self.screen == Screen::Chat && self.title.is_none();
         let current = self.pad_field_text();
         let Some(text) = horizon_nx::software_keyboard(current.as_deref().unwrap_or_default())
         else {
-            if chat {
+            if chat && !self.ui.in_bed_chat {
                 self.close_chat(super::chat::ChatExit::Intentional);
             }
             return;
