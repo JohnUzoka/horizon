@@ -12927,6 +12927,14 @@ impl Game<'_> {
         if self.renderer.as_mut().is_some_and(|r| r.display_changed()) {
             self.apply_ui_settings();
         }
+        // Switch: opening a world is CPU-bound; the CPU boost goes back on while its screens are up.
+        #[cfg(target_os = "horizon")]
+        if self.integrated_starting.is_some()
+            || self.world_loader.is_some()
+            || self.pending_entry.is_some()
+        {
+            horizon_nx::loading_world();
+        }
         // Minecraft.doWorldLoad: the LevelLoadingScreen while single player's
         // server starts. Its chunk map and progress are the server's, which
         // the window doesn't see yet: the title alone, over the menu background.
@@ -13457,6 +13465,9 @@ impl Game<'_> {
         reason: horizon_client::level_loading::Reason,
     ) {
         use horizon_client::level_loading::{self, Reason, STATUS_RADIUS};
+        // Switch: "Loading terrain" is part of opening a world (the CPU boost, as above).
+        #[cfg(target_os = "horizon")]
+        horizon_nx::loading_world();
         let atlas = &self.gui.atlas;
         let (w, h) = (batch.width, batch.height);
         match reason {

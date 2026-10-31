@@ -7,11 +7,14 @@
 //! and it goes off as soon as the player touches a control (a pad button or stick, or the touch
 //! screen; checked once a frame from `process_applet_messages`) or the game grabs the cursor,
 //! which it does once the player is in a world (`horizon_nx_entered_world`), whichever comes first.
-//! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks, to compare. Only an Application
-//! (title takeover) may boost; an applet (album) logs why and loads at the normal clocks.
+//! It goes back on while a world opens (`loading_world`, called by the game while it draws a
+//! world's loading screens), and off at the world or once those screens are gone.
+//! `HORIZON_NX_CPU_BOOST=0` in env.txt keeps the normal clocks throughout, to compare, and
+//! `HORIZON_NX_WORLD_BOOST=0` only while a world opens. Only an Application (title takeover) may
+//! boost; an applet (album) logs why and loads at the normal clocks.
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -33,10 +36,26 @@ unsafe extern "C" {
     fn hidGetTouchScreenStates(states: *mut TouchScreenState, count: usize) -> usize;
 }
 
-/// The boost is on: set by `start_from_env`, cleared by the first input or world.
+/// The boost is on: set by `start_from_env` or `loading_world`, cleared by `end`.
 static BOOSTED: AtomicBool = AtomicBool::new(false);
-/// When the boost went on (forced by `start_from_env` as it does), for the line that ends it.
+/// When the launch boost went on (forced by `start_from_env` as it does): the clock the rest of
+/// this file's times count from.
 static STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
+/// What the boost is on for: the launch (ends at the first input or the world) or a world's
+/// loading screens (end at the world, or once those screens are gone).
+const FOR_LAUNCH: u8 = 1;
+const FOR_WORLD: u8 = 2;
+static REASON: AtomicU8 = AtomicU8::new(0);
+/// The process may boost: an Application, and not `HORIZON_NX_CPU_BOOST=0`.
+static ALLOWED: AtomicBool = AtomicBool::new(false);
+/// `HORIZON_NX_WORLD_BOOST=0` opens worlds at the normal clocks.
+static WORLD_BOOST: AtomicBool = AtomicBool::new(true);
+/// When the boost last went on (ms after `STARTED`), for the line that ends it.
+static SINCE_MS: AtomicU64 = AtomicU64::new(0);
+/// Loop iterations since a loading screen was last drawn, counted while boosted for a world.
+static ITERATIONS_WITHOUT_LOADING: AtomicU32 = AtomicU32::new(0);
+/// That many iterations (about 2 s at 60 fps) without a loading screen: the open was cancelled.
+const LOADING_GONE: u32 = 120;
 
 /// libnx `HidAnalogStickState`.
 #[repr(C)]
@@ -93,6 +112,12 @@ thread_local! {
 /// Switches the boost on for the loading ahead, unless `HORIZON_NX_CPU_BOOST=0`. `init` calls it
 /// once, after env.txt is applied.
 pub(crate) fn start_from_env() {
+    if std::env::var("HORIZON_NX_WORLD_BOOST").is_ok_and(|v| v.trim() == "0") {
+        WORLD_BOOST.store(false, Ordering::Relaxed);
+        write_log_line(format_args!(
+            "[Boost] no CPU boost while a world opens (HORIZON_NX_WORLD_BOOST=0)\n"
+        ));
+    }
     if std::env::var("HORIZON_NX_CPU_BOOST").is_ok_and(|v| v.trim() == "0") {
         write_log_line(format_args!("[Boost] CPU boost off (HORIZON_NX_CPU_BOOST=0)\n"));
         return;
@@ -109,6 +134,8 @@ pub(crate) fn start_from_env() {
     let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
     if rc == 0 {
         LazyLock::force(&STARTED);
+        ALLOWED.store(true, Ordering::Relaxed);
+        REASON.store(FOR_LAUNCH, Ordering::Relaxed);
         BOOSTED.store(true, Ordering::SeqCst);
         write_log_line(format_args!(
             "[Boost] CPU boost on while loading (CPU 1785 MHz, GPU at its minimum) until the first input or the world\n"
@@ -120,10 +147,55 @@ pub(crate) fn start_from_env() {
     }
 }
 
-/// Once a frame, from `process_applet_messages`: while boosted, a pressed pad button, a tilted
-/// stick or a finger on the touch screen ends the boost, so the menus get the GPU back.
+fn elapsed_ms() -> u64 {
+    u64::try_from(STARTED.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The game draws a world's loading screen (opening a world, its server starting, "Loading
+/// terrain"), once a frame. Opening a world is CPU-bound too (log22: 170 s at the normal clocks),
+/// so the boost goes back on for it, and off at the world (`horizon_nx_entered_world`) or once
+/// these screens are gone for [`LOADING_GONE`] loop iterations (a cancelled open). Input doesn't end
+/// it: a button still held from picking the world would, and the boost would flicker. A launch
+/// boost still on (the world picked on the startup title) carries on as this one.
+pub fn loading_world() {
+    if !ALLOWED.load(Ordering::Relaxed) || !WORLD_BOOST.load(Ordering::Relaxed) {
+        return;
+    }
+    ITERATIONS_WITHOUT_LOADING.store(0, Ordering::Relaxed);
+    if BOOSTED.load(Ordering::Relaxed) {
+        REASON.store(FOR_WORLD, Ordering::Relaxed);
+        return;
+    }
+    // SAFETY: as in `start_from_env`.
+    let rc = unsafe { appletSetCpuBoostMode(BOOST_FAST_LOAD) };
+    if rc == 0 {
+        SINCE_MS.store(elapsed_ms(), Ordering::Relaxed);
+        REASON.store(FOR_WORLD, Ordering::Relaxed);
+        BOOSTED.store(true, Ordering::SeqCst);
+        write_log_line(format_args!(
+            "[Boost] CPU boost on while a world opens, until the world or its loading screens are gone\n"
+        ));
+    } else {
+        // Not again every frame.
+        WORLD_BOOST.store(false, Ordering::Relaxed);
+        write_log_line(format_args!(
+            "[Boost] appletSetCpuBoostMode(FastLoad) failed while a world opens: 0x{rc:x}\n"
+        ));
+    }
+}
+
+/// Once a frame, from `process_applet_messages`: while boosted for the launch, a pressed pad
+/// button, a tilted stick or a finger on the touch screen ends the boost, so the menus get the GPU
+/// back. While boosted for a world, it counts the iterations without a loading screen instead.
 pub(crate) fn end_on_input() {
     if !BOOSTED.load(Ordering::Relaxed) {
+        return;
+    }
+    if REASON.load(Ordering::Relaxed) == FOR_WORLD {
+        let iterations = ITERATIONS_WITHOUT_LOADING.fetch_add(1, Ordering::Relaxed) + 1;
+        if iterations >= LOADING_GONE {
+            end("the world's loading screens are gone");
+        }
         return;
     }
     let pad_touched = PAD.with(|pad| {
@@ -172,7 +244,7 @@ fn end(why: &str) {
     }
     // SAFETY: as in `start_from_env`.
     let rc = unsafe { appletSetCpuBoostMode(BOOST_NORMAL) };
-    let secs = STARTED.elapsed().as_secs_f64();
+    let secs = elapsed_ms().saturating_sub(SINCE_MS.load(Ordering::Relaxed)) as f64 / 1000.0;
     write_log_line(format_args!(
         "[Boost] CPU boost off: {why}, {secs:.1} s after it went on (result 0x{rc:x})\n"
     ));

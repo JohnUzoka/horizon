@@ -34,6 +34,8 @@ pub use compat::{
     thread_logging,
 };
 #[cfg(target_os = "horizon")]
+pub use boost::loading_world;
+#[cfg(target_os = "horizon")]
 pub use keyboard::software_keyboard;
 pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
