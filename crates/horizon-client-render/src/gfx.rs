@@ -4453,6 +4453,13 @@ impl Renderer {
         self.translucency_cursor += budget;
         let translucent_draws = self.draws.len() as u32 - solid_draws;
         self.section_draws = self.draws.len();
+        #[cfg(target_os = "horizon")]
+        terrain_stats::frame(
+            &self.draws,
+            tiles,
+            phase1_draws as usize,
+            solid_draws as usize,
+        );
         // The shadow camera's sections after the camera's: quads that can face the light, then
         // translucent ones (in their last sorted order; depth decides there).
         let shadow_first = self.draws.len() as u32;
@@ -6598,5 +6605,66 @@ fn reported(l: horizon_hdr::wayland::Luminances) -> crate::graphics::Reported {
     crate::graphics::Reported {
         paper_white: 203,
         peak: peak.clamp(200, 10_000),
+    }
+}
+
+/// The Switch port's count of the terrain's draws and triangles per frame, logged every 600
+/// frames: its GPU time grows with the sections drawn (RUN 24-26), and this says how much geometry
+/// that is. Occlusion-tested draws are the most phase 2 can draw; the test skips the hidden ones.
+#[cfg(target_os = "horizon")]
+mod terrain_stats {
+    use std::sync::Mutex;
+
+    struct Sums {
+        frames: u64,
+        draws: u64,
+        /// Indices: full-detail sections, far-terrain tiles, occlusion-tested, translucent.
+        indices: [u64; 4],
+    }
+
+    static SUMS: Mutex<Sums> = Mutex::new(Sums {
+        frames: 0,
+        draws: 0,
+        indices: [0; 4],
+    });
+
+    /// `draws` is the frame's indirect list: sections up to `tiles`, far terrain up to `phase1`,
+    /// occlusion-tested up to `solid`, translucent after.
+    pub(super) fn frame(draws: &[[u32; 5]], tiles: usize, phase1: usize, solid: usize) {
+        let indices = |r: &[[u32; 5]]| r.iter().map(|d| u64::from(d[0])).sum::<u64>();
+        let mut s = SUMS.lock().unwrap_or_else(|e| e.into_inner());
+        s.frames += 1;
+        s.draws += draws.len() as u64;
+        let parts = [
+            indices(&draws[..tiles]),
+            indices(&draws[tiles..phase1]),
+            indices(&draws[phase1..solid]),
+            indices(&draws[solid..]),
+        ];
+        for (sum, part) in s.indices.iter_mut().zip(parts) {
+            *sum += part;
+        }
+        if s.frames < 600 {
+            return;
+        }
+        let frames = s.frames as f64;
+        let k = |i: u64| i as f64 / 3.0 / frames / 1000.0;
+        let [sections, tiles, tested, translucent] = s.indices;
+        log::info!(
+            "Horizon: terrain per frame over the last {} frames: {:.0} draws, {:.0}k triangles \
+             (sections {:.0}k, far terrain {:.0}k, occlusion-tested up to {:.0}k, translucent {:.0}k)",
+            s.frames,
+            s.draws as f64 / frames,
+            k(sections + tiles + tested + translucent),
+            k(sections),
+            k(tiles),
+            k(tested),
+            k(translucent),
+        );
+        *s = Sums {
+            frames: 0,
+            draws: 0,
+            indices: [0; 4],
+        };
     }
 }
