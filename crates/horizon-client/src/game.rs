@@ -13811,6 +13811,59 @@ impl Game<'_> {
             None => distance.min(1024),
         }
     }
+    /// The Switch port's record of what a run measured: every 600 frames in a world, the
+    /// settings that change the GPU's work, and the time of day and the weather (RUN 28 ran at
+    /// settings no log showed, and RUN 30's options went back to their defaults unseen: clouds,
+    /// the frame cap and the inactivity limit).
+    #[cfg(target_os = "horizon")]
+    fn log_world_settings(&self) {
+        static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 600 != 0 {
+            return;
+        }
+        let (s, w) = (&self.settings, &self.world);
+        let at = self.player.as_ref().map_or_else(
+            || "-".to_owned(),
+            |p| format!("{:.1} {:.1} {:.1}", p.position.x, p.position.y, p.position.z),
+        );
+        log::info!(
+            "Horizon: world settings: render distance {}, simulation distance {}, LOD Distance {} \
+             ({} used), Far Detail {}, resolution scale {}%, VSync {}, max fps {}; day time {} \
+             ({} into the day), rain {:.2}, thunder {:.2}; player at {at}, yaw {:.0}, pitch {:.0}",
+            s.render_distance,
+            s.simulation_distance,
+            s.horizon.lod_distance,
+            self.lod_distance(),
+            s.horizon.far_detail.label(),
+            s.horizon.resolution_scale,
+            if s.vsync { "on" } else { "off" },
+            s.max_fps,
+            w.day_time,
+            w.day_time.rem_euclid(24_000),
+            w.weather.rain_level.1,
+            w.weather.thunder_level.1,
+            self.yaw,
+            self.pitch,
+        );
+        log::info!(
+            "Horizon: video settings: clouds {} (range {}), graphics {}, vignette {}, chunk fade \
+             {:.2}, mipmaps {}, smooth lighting {}, entity shadows {}, particles {}, cutout leaves \
+             {}, improved transparency {}, inactivity fps limit {}, fov {:.0}",
+            s.clouds,
+            s.cloud_range,
+            s.graphics_preset,
+            s.vignette,
+            s.chunk_fade,
+            s.mipmap_levels,
+            s.smooth_lighting,
+            s.entity_shadows,
+            s.particles,
+            s.cutout_leaves,
+            s.improved_transparency,
+            s.inactivity_fps_limit,
+            s.fov,
+        );
+    }
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
     fn terrain_distance(&self) -> i32 {
         if self.lod.is_some() {
@@ -14956,6 +15009,8 @@ impl ApplicationHandler for Game<'_> {
                     if self.title.is_none() {
                         horizon_client::spans::time("update_world", || self.update_world());
                         horizon_client::spans::time("spawn_player", || self.spawn_player())?;
+                        #[cfg(target_os = "horizon")]
+                        self.log_world_settings();
                     }
                     let updated = Instant::now();
                     self.track_toggle_screens();
