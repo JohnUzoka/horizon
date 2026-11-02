@@ -299,14 +299,20 @@ fn sunrise_weight(d: vec3<f32>) -> f32 {
     }
     return best;
 }
-// The sky's colour along the view ray `d` (a shader pack's sky stage gets it as its input:
-// gfx/native_sky.rs builds that stage from this section).
-fn sky_along_ray(d: vec3<f32>) -> vec3<f32> {
+// The sky's colour along the view ray `d` without the sunrise fan: the native sky pass draws
+// the fan over it as triangles (`vs_sunrise`).
+fn sky_base_along_ray(d: vec3<f32>) -> vec3<f32> {
     var color = globals.fog_color.rgb;
     let dist = disc_distance(d, 16.0);
     if dist.x >= 0.0 {
         color = sky_fog(globals.sky_color.rgb, dist);
     }
+    return color;
+}
+// The sky's colour along the view ray `d`, the fan included (a shader pack's sky stage gets it
+// as its input: gfx/native_sky.rs builds that stage from this section).
+fn sky_along_ray(d: vec3<f32>) -> vec3<f32> {
+    var color = sky_base_along_ray(d);
     let w = sunrise_weight(d);
     if w > 0.0 {
         color = mix(color, globals.sunrise.rgb, w * globals.sunrise.a);
@@ -314,7 +320,7 @@ fn sky_along_ray(d: vec3<f32>) -> vec3<f32> {
     return color;
 }
 @fragment fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
-    return vec4(sky_along_ray(view_ray(in.ndc)), 1.0);
+    return vec4(sky_base_along_ray(view_ray(in.ndc)), 1.0);
 }
 @fragment fn fs_dark_disc(in: SkyOut) -> @location(0) vec4<f32> {
     let d = view_ray(in.ndc);
@@ -392,4 +398,23 @@ struct DebugLineOut {
 }
 @fragment fn fs_debug_line(in: DebugLineOut) -> @location(0) vec4<f32> {
     return apply_fog(in.color, in.spherical, in.cylindrical);
+}
+
+// The sunrise/sunset fan as vanilla draws it (SkyRenderer.renderSunriseAndSunset), over the
+// native sky pass: its 16 triangles in clip space (gfx/sunrise_fan.rs `triangles`), the apex
+// weight interpolated with perspective, which is the barycentric `sunrise_weight` finds per
+// pixel. Blended (ALPHA_BLENDING) it is `sky_along_ray`'s mix, on only the pixels the fan
+// covers instead of a per-pixel test over the whole sky.
+struct SunriseOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) weight: f32,
+}
+@vertex fn vs_sunrise(@location(0) clip: vec4<f32>, @location(1) weight: f32) -> SunriseOut {
+    var out: SunriseOut;
+    out.clip = clip;
+    out.weight = weight;
+    return out;
+}
+@fragment fn fs_sunrise(in: SunriseOut) -> @location(0) vec4<f32> {
+    return vec4(globals.sunrise.rgb, in.weight * globals.sunrise.a);
 }

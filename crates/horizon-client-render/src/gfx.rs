@@ -444,6 +444,9 @@ pub struct Renderer {
     sides_on: bool,
     sky: wgpu::RenderPipeline,
     dark_disc: wgpu::RenderPipeline,
+    /// The sunrise fan, rasterized over the native sky (`vs_sunrise`), and its corners.
+    sunrise: wgpu::RenderPipeline,
+    sunrise_vertices: wgpu::Buffer,
     lines: wgpu::RenderPipeline,
     lines_secondary: wgpu::RenderPipeline,
     /// Gizmo lines (`RenderTypes.linesTranslucentNoDepthWrite`) and the
@@ -1537,6 +1540,22 @@ impl Renderer {
             false,
             Some(alpha_blend),
         );
+        let sunrise_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32];
+        let sunrise = pipeline(
+            "Sunrise fan",
+            "vs_sunrise",
+            "fs_sunrise",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<sunrise_fan::Corner>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &sunrise_attributes,
+            })],
+            tri,
+            None,
+            false,
+            false,
+            Some(alpha_blend),
+        );
         let lines = pipeline(
             "Block outline",
             "vs_line",
@@ -2606,6 +2625,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let sunrise_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sunrise fan"),
+            size: (3 * sunrise_fan::TRIANGLES * std::mem::size_of::<sunrise_fan::Corner>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let entity_capacity = 1 << 14;
         let entity_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Entity vertices"),
@@ -2753,6 +2778,8 @@ impl Renderer {
             flat,
             sky,
             dark_disc,
+            sunrise,
+            sunrise_vertices,
             lines,
             lines_secondary,
             debug_lines,
@@ -4089,6 +4116,17 @@ impl Renderer {
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
+        if frame.sky.sunrise_color[3] > 0.001 {
+            // The native sky pass draws the fan from these (`vs_sunrise`); with the sky's own
+            // projection and view, as `fs_sky` rebuilds its rays.
+            let fan = sunrise_fan::triangles(
+                frame.sky.sunrise_color[3],
+                sun,
+                views.primary().view_proj(Mat4::IDENTITY),
+            );
+            self.uploads
+                .buffer(&mut encoder, &self.sunrise_vertices, 0, bytemuck::cast_slice(&fan));
+        }
         // GameRenderer.render3dHud: the hand's projection at hudFov, with the
         // bob in its pose rather than the projection (same product).
         let hand_projection = Mat4::from_cols_array(&crate::camera::hand_projection(
@@ -5071,6 +5109,12 @@ impl Renderer {
                         None => {
                             pass.set_pipeline(&self.sky);
                             pass.draw(0..3, 0..1);
+                            // `sunrise_weight`'s own cut-off.
+                            if frame.sky.sunrise_color[3] > 0.001 {
+                                pass.set_pipeline(&self.sunrise);
+                                pass.set_vertex_buffer(0, self.sunrise_vertices.slice(..));
+                                pass.draw(0..(3 * sunrise_fan::TRIANGLES) as u32, 0..1);
+                            }
                         }
                     }
                 }
