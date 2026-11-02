@@ -103,6 +103,13 @@ pub const DEFAULT_CLOUD_RANGE: i32 = 128;
 /// goes to 128.
 #[cfg(target_os = "horizon")]
 pub const DEFAULT_CLOUD_RANGE: i32 = 32;
+/// Cutout Leaves' default: vanilla's on (see-through leaves).
+#[cfg(not(target_os = "horizon"))]
+pub const DEFAULT_CUTOUT_LEAVES: bool = true;
+/// On the Switch, off (solid leaves, as vanilla's Fast preset sets): in a forest, on drew 3.3x the
+/// triangles and cost ~12 ms a frame (RUN 34: 35 fps against 59). The menu still turns it on.
+#[cfg(target_os = "horizon")]
+pub const DEFAULT_CUTOUT_LEAVES: bool = false;
 const INACTIVITY: &[&str] = &["minimized", "afk"];
 const CLOUDS: &[&str] = &["false", "fast", "true"];
 const MAIN_HAND: &[&str] = &["left", "right"];
@@ -140,7 +147,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
             O(Scaled(0, 40, 20.0, 0.0, 2.0)),
             V::Double(0.75),
         ),
-        b("cutoutLeaves", true),
+        b("cutoutLeaves", DEFAULT_CUTOUT_LEAVES),
         b("enableVsync", true),
         def(
             "entityDistanceScaling",

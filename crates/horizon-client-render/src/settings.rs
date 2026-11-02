@@ -234,7 +234,7 @@ impl Default for Settings {
             chunk_fade: 0.75,
             vignette: true,
             autosave_indicator: true,
-            cutout_leaves: true,
+            cutout_leaves: crate::options_file::DEFAULT_CUTOUT_LEAVES,
             improved_transparency: false,
             attack_indicator: 1,
             inactivity_fps_limit: "afk".into(),
