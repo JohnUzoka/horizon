@@ -223,7 +223,7 @@ impl Default for Settings {
             fullscreen: false,
             smooth_lighting: true,
             clouds: "true".into(),
-            cloud_range: 128,
+            cloud_range: crate::options_file::DEFAULT_CLOUD_RANGE,
             particles: 0,
             entity_distance: 1.0,
             entity_shadows: true,

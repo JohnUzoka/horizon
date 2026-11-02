@@ -95,6 +95,14 @@ pub const MAX_RENDER_DISTANCE: i32 = 128;
 /// alike, and at 30 a world filled it within five minutes and the GPU device was lost.
 #[cfg(target_os = "horizon")]
 pub const MAX_RENDER_DISTANCE: i32 = 12;
+/// Clouds' default reach in chunks: vanilla's 128.
+#[cfg(not(target_os = "horizon"))]
+pub const DEFAULT_CLOUD_RANGE: i32 = 128;
+/// On the Switch, 32 (vanilla's Fast preset sets it too): Fancy clouds at 128 chunks were one
+/// draw of ~222k vertices and 2.2 ms of a frame, at 32 chunks 0.8 ms (RUN 31-32). The menu still
+/// goes to 128.
+#[cfg(target_os = "horizon")]
+pub const DEFAULT_CLOUD_RANGE: i32 = 32;
 const INACTIVITY: &[&str] = &["minimized", "afk"];
 const CLOUDS: &[&str] = &["false", "fast", "true"];
 const MAIN_HAND: &[&str] = &["left", "right"];
@@ -166,7 +174,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         id("particles", 3, 0),
         b("reducedDebugInfo", false),
         def("renderClouds", O(Clouds), V::Int(2)),
-        i("cloudRange", 2, 128, 128),
+        i("cloudRange", 2, 128, DEFAULT_CLOUD_RANGE),
         i("renderDistance", 2, MAX_RENDER_DISTANCE, 12),
         i("simulationDistance", 5, 32, 12),
         u("screenEffectScale", 1.0),
