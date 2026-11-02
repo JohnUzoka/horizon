@@ -75,7 +75,8 @@ struct TerrainOut {
     // The light the face emits, 0 to 15 (mesher.rs's `EMISSION_BITS`).
     @location(5) @interpolate(flat) emission: u32,
     @location(6) @interpolate(flat) fade: u32,
-    // A distant tile's tile-relative position, for its fade (`faded`).
+    // A distant tile's tile-relative position, for its fade (`faded`); a merged face's
+    // camera-relative one, for its fog (`fs_translucent`).
     @location(7) local: vec3<f32>,
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
@@ -160,6 +161,12 @@ fn sample_lightmap(sky: f32, block: f32) -> vec4<f32> {
 fn terrain_uv(packed: vec2<u32>, step: f32) -> vec2<f32> {
     return vec2<f32>(packed) * fract(abs(step));
 }
+// The step of a vertex of `layer`: its instance's (`w`), or 1/32 per block when
+// bit 14 marks a section's merged face (mesher.rs's TILED_LAYER, merge.rs),
+// whose sprite repeats once a block as a distant tile's does.
+fn uv_step(layer: u32, w: f32) -> f32 {
+    return select(w, 1.0 / 32.0, (layer & 0x4000u) != 0u);
+}
 // A fading distant tile's dither code (gfx/lod.rs's `fade_code`), 0 when whole.
 fn fade_code(w: f32) -> u32 {
     return u32(floor(max(-w, 0.0)));
@@ -168,8 +175,8 @@ fn fade_code(w: f32) -> u32 {
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> TerrainOut {
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
-        origin.w);
+    return terrain_vertex(position, terrain_uv(uv, uv_step(layer, origin.w)), layer, color,
+        light, origin.xyz, origin.w);
 }
 // Flat section draws (gfx/flat.rs): one draw per arena page over the frame's
 // index list. A section's vertices fill whole 256-vertex blocks of its page:
@@ -182,15 +189,17 @@ fn fade_code(w: f32) -> u32 {
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
     let origin = slot_origins[block_slots[vertex >> 8u]];
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
-        origin.w);
+    return terrain_vertex(position, terrain_uv(uv, uv_step(layer, origin.w)), layer, color,
+        light, origin.xyz, origin.w);
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
     light: vec2<u32>, origin: vec3<f32>, w: f32) -> TerrainOut {
     let pos = position + origin;
     var out: TerrainOut;
     out.clip = fade_depth(globals.view_proj * vec4(pos, 1.0), w);
-    out.local = position;
+    // A merged face (bit 14) is see-through, never faded: `local` carries its
+    // camera-relative position instead, for fs_translucent's fog.
+    out.local = select(position, pos, (layer & 0x4000u) != 0u);
     out.uv = uv;
     out.layer = layer;
     let block = max(f32(light.y), dynamic_block_light(pos));
@@ -216,7 +225,7 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     let dy = dpdy(in.local);
     if faded(in.fade, in.local, dx, dy) { discard; }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    let color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    let color = sprite(in.uv, in.layer & 0x3fffu) * in.color;
     if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
     // Below 0.75, alpha tells HDR output (hdr.wgsl) a light source's bright
     // pixels may shine, and at which tier (mesher::hdr_tier): 0.525 at the
@@ -228,8 +237,14 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(in: TerrainOut) -> @location(0) vec4<f32> {
-    let color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    let color = sprite(in.uv, in.layer & 0x3fffu) * in.color;
     if color.a < 0.01 { discard; }
+    // A merged face spans blocks: the distances its corners give would overshoot
+    // inside it (water's fog ends a few dozen blocks out), so its pixels take
+    // theirs from where they are.
+    if (in.layer & 0x4000u) != 0u {
+        return apply_fog(color, length(in.local), max(length(in.local.xz), abs(in.local.y)));
+    }
     return apply_fog(color, in.spherical, in.cylindrical);
 }
 

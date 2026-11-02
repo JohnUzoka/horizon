@@ -13303,6 +13303,13 @@ impl Game<'_> {
         } else {
             self.shader_pack_inputs(camera, alpha as f32)
         };
+        // Merged water needs a sprite that repeats and light the same along a strip: sections
+        // are rebuilt when a shader pack or the dynamic lights extra turns it off or on.
+        let merge_water = world_loading::merge_water(&self.settings, &self.native_shaders.picked);
+        if !title && merge_water != self.streaming.merge_water {
+            self.streaming.merge_water = merge_water;
+            self.all_sections_changed();
+        }
         // Map textures and font glyphs changed while building this frame's
         // geometry (game/maps.rs, world text) upload with this batch; draining
         // map_patches any earlier leaves them a frame behind.

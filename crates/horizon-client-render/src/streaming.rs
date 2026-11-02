@@ -174,6 +174,7 @@ struct MeshSettings {
     blend_radius: i32,
     smooth_lighting: bool,
     cutout_leaves: bool,
+    merge_water: bool,
 }
 enum Job {
     Generate(i32, i32),
@@ -349,6 +350,9 @@ pub struct Streaming {
     /// The `ao` and `cutoutLeaves` options.
     pub smooth_lighting: bool,
     pub cutout_leaves: bool,
+    /// Sections draw an open water surface as strips (`SectionMesh::merge_water`): the game
+    /// sets it on the Switch.
+    pub merge_water: bool,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
     light_tables: Arc<LightTables>,
     /// Applied edits by sequence, replayed onto light jobs snapshotted before them.
@@ -649,6 +653,9 @@ impl Streaming {
                                         visibility,
                                     };
                                     let mut mesh = mesher.mesh(&borrow(&region), sy);
+                                    if settings.merge_water {
+                                        mesh.merge_water();
+                                    }
                                     mesh.sort_solid();
                                     faces = Some((context.tables.clone(), mesher.visibility));
                                     Done::Meshed(x, sy, z, mesh, seq)
@@ -710,6 +717,7 @@ impl Streaming {
             biome_blend: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            merge_water: false,
             light_tables,
             light_log: Vec::new(),
             light_edit_sequence: 0,
@@ -1460,6 +1468,7 @@ impl Streaming {
                             blend_radius: self.biome_blend,
                             smooth_lighting: self.smooth_lighting,
                             cutout_leaves: self.cutout_leaves,
+                            merge_water: self.merge_water,
                         },
                     ),
                 );

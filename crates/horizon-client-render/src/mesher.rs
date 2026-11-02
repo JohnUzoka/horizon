@@ -5,6 +5,7 @@
 //! follow `FluidRenderer` (see `fluid`).
 mod fluid;
 mod lighting;
+mod merge;
 mod sides;
 use crate::{
     assets::{Assets, RenderAssets},
@@ -61,7 +62,8 @@ pub struct TerrainVertex {
     /// UV within the sprite, `UV_STEPS` per unit (`TerrainVertex::new`,
     /// `terrain.wgsl`'s `terrain_uv`).
     pub(crate) uv: [u16; 2],
-    /// Sprite array layer, with `OPAQUE_LAYER` for opaque leaves and quads over opaque texels.
+    /// Sprite array layer, with `OPAQUE_LAYER` for opaque leaves and quads over opaque texels,
+    /// and `TILED_LAYER` for a merged face's UV.
     pub layer: u16,
     /// Smooth light, 16x fixed point: sky in the low byte, block in the high one.
     pub light: u16,
@@ -83,8 +85,9 @@ impl TerrainVertex {
             color,
         }
     }
-    /// A vertex of a merged distant-terrain face, its UV in blocks from the
-    /// face's corner. Drawn with an instance UV scale of `1 / TILED_UV_STEPS`.
+    /// A vertex of a merged face, its UV in blocks from the face's corner: drawn with an
+    /// instance UV scale of `1 / TILED_UV_STEPS` (distant terrain), or with `TILED_LAYER` on its
+    /// layer (a section's merged water, `SectionMesh::merge_water`).
     pub fn tiled(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
         Self {
             pos,
@@ -175,6 +178,12 @@ impl SectionMesh {
     /// leave out those facing away from the eye (`sides`).
     pub fn sort_solid(&mut self) {
         self.sides = sides::sort(&mut self.solid);
+    }
+    /// Draws an open water surface, the section's only see-through quads, as strips that repeat
+    /// their sprite (`merge`): the Switch's, where triangles are the GPU's cost. False when the
+    /// section keeps its quads.
+    pub fn merge_water(&mut self) -> bool {
+        merge::merge(&mut self.translucent)
     }
 }
 pub const ALL_VISIBLE: u64 = (1 << 36) - 1;
@@ -682,6 +691,11 @@ impl Padded {
 }
 /// Set on a terrain vertex's sprite layer when its texture alpha must be ignored.
 pub const OPAQUE_LAYER: u16 = 1 << 15;
+/// Set on a section vertex's sprite layer when its UV is in distant terrain's steps,
+/// `TILED_UV_STEPS` a block, whatever its instance's (terrain.wgsl's `uv_step`): a merged face
+/// (`SectionMesh::merge_water`). Sprite layers stay below it, terrain.wgsl's eight arrays of
+/// `SPRITE_SPLIT` (gfx.rs); `merge` leaves a quad whose layer has it alone.
+pub const TILED_LAYER: u16 = 1 << 14;
 /// The bits of `TerrainVertex::color`'s alpha byte that hold how brightly its face shines
 /// in HDR output (`gfx/hdr.rs`): 15 minus the tier, so the usual 0xFF means none. The
 /// byte's other four bits stay set.

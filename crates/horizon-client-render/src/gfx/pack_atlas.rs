@@ -168,15 +168,17 @@ impl PackAtlas {
             self.sprite as f32 / height as f32,
         ];
         let columns = self.columns;
-        // UVs past a sprite (models up to 2, distant tiles) cannot repeat in an atlas: clamped.
+        // UVs past a sprite (models up to 2, distant tiles, merged water) cannot repeat in an
+        // atlas: clamped. Bit 14 of the layer marks merged water's tile steps (terrain.wgsl's
+        // `uv_step`), which the game only meshes without a pack, and bit 15 opaque leaves.
         // The colour's alpha holds HDR's emission level (`mesher::EMISSION_BITS`): packs get 1.
         let body = format!(
             "    vec4 hz_origin = {origin};\n    \
-             uint hz_layer = hz_v_layer & 32767u;\n    \
+             uint hz_layer = hz_v_layer & 16383u;\n    \
              hz_cell = vec2(float(hz_layer % {columns}u), float(hz_layer / {columns}u));\n    \
              hz_scale = vec2({:?}, {:?});\n    \
              hz_Vertex = vec4(hz_v_pos + hz_origin.xyz, 1.0);\n    \
-             hz_MultiTexCoord0 = vec4((hz_cell + clamp(vec2(hz_v_uv) * fract(abs(hz_origin.w)), 0.0, 1.0)) * hz_scale, 0.0, 1.0);\n    \
+             hz_MultiTexCoord0 = vec4((hz_cell + clamp(vec2(hz_v_uv) * ((hz_v_layer & 16384u) != 0u ? 1.0 / 32.0 : fract(abs(hz_origin.w))), 0.0, 1.0)) * hz_scale, 0.0, 1.0);\n    \
              hz_MultiTexCoord1 = vec4(float(hz_v_light.y), float(hz_v_light.x), 0.0, 1.0);\n    \
              hz_MultiTexCoord2 = hz_MultiTexCoord1;\n    \
              hz_Color = vec4(hz_v_color.rgb, 1.0);\n    \

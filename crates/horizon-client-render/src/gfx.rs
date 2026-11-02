@@ -35,6 +35,8 @@ fn entity_shader() -> String {
 
 #[cfg(test)]
 mod crumbling_tests;
+#[cfg(test)]
+mod merged_water_tests;
 mod entity_batch;
 mod entity_outline;
 mod weather;

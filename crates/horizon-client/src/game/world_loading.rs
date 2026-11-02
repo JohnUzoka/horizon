@@ -487,6 +487,7 @@ pub(super) fn make_streaming(
     streaming.biome_blend = settings.biome_blend;
     streaming.smooth_lighting = settings.smooth_lighting;
     streaming.cutout_leaves = settings.cutout_leaves;
+    streaming.merge_water = merge_water(settings, &settings.horizon.shader_pack);
     streaming.biome_zoom = BiomeZoom::new(obfuscate_seed(seed));
     streaming.sky_light = dim != Dim::Nether;
     streaming.nether_shading = dim == Dim::Nether;
@@ -494,6 +495,14 @@ pub(super) fn make_streaming(
     // dedicated one meshes sections.
     streaming.mesh = options.execution_role.is_client();
     Ok((streaming, save, locator))
+}
+
+/// Whether sections draw an open water surface as strips (`SectionMesh::merge_water`): on the
+/// Switch, where triangles are the GPU's cost (the port's OPTIMIZATIONS.md O20), unless the
+/// dynamic lights extra (lit per vertex, so at a strip's ends only) or shader pack `pack` (its
+/// atlas cannot repeat a sprite) is on.
+pub(super) fn merge_water(settings: &Settings, pack: &str) -> bool {
+    cfg!(target_os = "horizon") && !settings.extras.dynamic_lights && pack.is_empty()
 }
 
 #[cfg(test)]

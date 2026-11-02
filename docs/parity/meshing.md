@@ -142,6 +142,12 @@ gate.
 - Opaque leaves: the vertex layer carries a flag (`OPAQUE_LAYER`) that makes
   the terrain shader ignore the texture's alpha; the shader side is not
   compared (GPU pixels).
+- Merged water (the Switch only, `SectionMesh::merge_water`): a section whose
+  see-through quads are all an open water surface draws it as strips a block
+  deep, flagged `TILED_LAYER`, after the mesher; the gate compares
+  `Mesher::mesh`'s output before it. The host test
+  `gfx::merged_water_tests` draws a merged lake against its quads (GPU
+  pixels).
 - Layers: vanilla's solid and cutout layers are compared as one class because
   Horizon draws both in its opaque pass.
 - Not compared: block entities and their renderers, animated sprite frames,
