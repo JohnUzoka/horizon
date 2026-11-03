@@ -95,6 +95,13 @@ pub const MAX_RENDER_DISTANCE: i32 = 128;
 /// alike, and at 30 a world filled it within five minutes and the GPU device was lost.
 #[cfg(target_os = "horizon")]
 pub const MAX_RENDER_DISTANCE: i32 = 12;
+/// Simulation distance's cap: vanilla's 32.
+#[cfg(not(target_os = "horizon"))]
+pub const MAX_SIMULATION_DISTANCE: i32 = 32;
+/// On the Switch, 12 as the render distance: the server keeps and ticks every chunk within it, in
+/// the same heap.
+#[cfg(target_os = "horizon")]
+pub const MAX_SIMULATION_DISTANCE: i32 = 12;
 /// Clouds' default reach in chunks: vanilla's 128.
 #[cfg(not(target_os = "horizon"))]
 pub const DEFAULT_CLOUD_RANGE: i32 = 128;
@@ -183,7 +190,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         def("renderClouds", O(Clouds), V::Int(2)),
         i("cloudRange", 2, 128, DEFAULT_CLOUD_RANGE),
         i("renderDistance", 2, MAX_RENDER_DISTANCE, 12),
-        i("simulationDistance", 5, 32, 12),
+        i("simulationDistance", 5, MAX_SIMULATION_DISTANCE, 12),
         u("screenEffectScale", 1.0),
         def("soundDevice", O(AnyStr), V::Str(String::new())),
         b("vignette", true),

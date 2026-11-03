@@ -716,7 +716,9 @@ impl Game<'_> {
             );
         }
         self.settings.render_distance = props.view_distance.clamp(2, 32);
-        self.settings.simulation_distance = props.simulation_distance.clamp(2, 32);
+        self.settings.simulation_distance = props
+            .simulation_distance
+            .clamp(2, horizon_client::options_file::MAX_SIMULATION_DISTANCE);
         // Nothing is kept around the spawn while nobody is on.
         self.streaming.radius = -1;
         self.settle_spawn()?;

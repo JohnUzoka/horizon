@@ -325,7 +325,11 @@ impl Opt {
                 2.0,
                 crate::options_file::MAX_RENDER_DISTANCE as f32,
             ),
-            Opt::SimulationDistance => unit(s.simulation_distance as f32, 5.0, 32.0),
+            Opt::SimulationDistance => unit(
+                s.simulation_distance as f32,
+                5.0,
+                crate::options_file::MAX_SIMULATION_DISTANCE as f32,
+            ),
             Opt::Sensitivity => Kind::Slider(s.sensitivity),
             Opt::WheelSensitivity => unit(s.mouse_wheel_sensitivity, 0.01, 10.0),
             Opt::Volume(i) => Kind::Slider(if i == 0 {
@@ -779,7 +783,10 @@ impl Opt {
                 s.render_distance =
                     step(2.0, crate::options_file::MAX_RENDER_DISTANCE as f32) as i32
             }
-            Opt::SimulationDistance => s.simulation_distance = step(5.0, 32.0) as i32,
+            Opt::SimulationDistance => {
+                s.simulation_distance =
+                    step(5.0, crate::options_file::MAX_SIMULATION_DISTANCE as f32) as i32
+            }
             Opt::Sensitivity => s.sensitivity = v,
             Opt::WheelSensitivity => s.mouse_wheel_sensitivity = 0.01 + v * 9.99,
             Opt::Volume(0) => s.master_volume = v,
