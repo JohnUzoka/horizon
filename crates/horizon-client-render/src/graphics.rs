@@ -629,7 +629,8 @@ pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
             Preset::Ultra => (24, 12, "true", 0, true, 3, 4, 1.5, true, 10),
             Preset::Custom => return,
         };
-    s.render_distance = rd;
+    // Capped where the game caps the option (`MAX_RENDER_DISTANCE`: 12 on the Switch).
+    s.render_distance = rd.min(crate::options_file::MAX_RENDER_DISTANCE);
     s.simulation_distance = sim;
     s.clouds = clouds.into();
     s.particles = particles;

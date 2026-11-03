@@ -1107,7 +1107,9 @@ pub fn apply_preset(s: &mut Settings) {
         }
         "fancy" | "fabulous" => {
             s.biome_blend = 2;
-            s.render_distance = if fabulous { 32 } else { 16 };
+            // Capped where the game caps the option (`MAX_RENDER_DISTANCE`: 12 on the Switch).
+            s.render_distance =
+                (if fabulous { 32 } else { 16 }).min(crate::options_file::MAX_RENDER_DISTANCE);
             s.prioritize_chunk_updates = 1;
             s.simulation_distance = 12;
             s.smooth_lighting = true;
