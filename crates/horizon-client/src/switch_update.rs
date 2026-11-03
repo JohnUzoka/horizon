@@ -1,15 +1,17 @@
 //! The Switch build's updates (docs/switch-updates.md). Once a launch the NRO asks GitHub for
 //! [`REPO`]'s releases; a newer Switch build turns the title screen's Realms button into an update
-//! button. Pressing it downloads the release's `horizon.nro` beside the running one, checks it
-//! against the release's SHA-256 and GitHub's own digest of the file, keeps the running NRO as
-//! `<name>.nro.old` and puts the new one in its place; quitting then starts it through the
-//! homebrew loader where the loader can, and on the next launch otherwise.
+//! button. Pressing it asks first, then downloads the release's `horizon.nro` beside the running
+//! one, checks it against the release's SHA-256 and GitHub's own digest of the file, keeps the
+//! running NRO as `<name>.nro.old` and puts the new one in its place; quitting then starts it
+//! through the homebrew loader where the loader can, and on the next launch otherwise. That launch
+//! says it was updated (a `.updated` marker beside the NRO).
 //!
 //! Skate 3's release updater protocol 1, for one file: releases come only from [`REPO`]'s API,
 //! over HTTPS (redirects too), downloads only from its release downloads and within size limits,
 //! each release names its repository, target, tag and build in a `release.json`, and no token is
 //! ever sent. Off the Switch nothing here starts: the desktop game has the launcher.
 use std::{
+    collections::VecDeque,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
@@ -57,24 +59,26 @@ pub enum Status {
     Failed { build: u32 },
 }
 
-/// What the title shows as a toast, once each.
+/// What the title shows as a toast, each once, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Available { build: u32 },
     Installed { build: u32 },
     /// Why, in a few words; the log has the details.
     Failed { reason: &'static str },
+    /// The first launch of the build an update installed.
+    Updated { build: u32 },
 }
 
 struct State {
     status: Status,
     release: Option<Release>,
-    event: Option<Event>,
+    events: VecDeque<Event>,
 }
 static STATE: Mutex<State> = Mutex::new(State {
     status: Status::None,
     release: None,
-    event: None,
+    events: VecDeque::new(),
 });
 
 fn state() -> MutexGuard<'static, State> {
@@ -85,9 +89,14 @@ pub fn status() -> Status {
     state().status.clone()
 }
 
-/// The newest event the title hasn't shown yet.
+/// The oldest event the title hasn't shown yet.
 pub fn take_event() -> Option<Event> {
-    state().event.take()
+    state().events.pop_front()
+}
+
+/// The available release's NRO size in bytes, for the title's question.
+pub fn download_size() -> Option<u64> {
+    state().release.as_ref().map(|release| release.package.size)
 }
 
 /// Starts the launch's one check on a thread of its own: on the Switch, the first time the title
@@ -100,26 +109,24 @@ pub fn start_check() {
     }
 }
 
-/// The title's update button: starts the download (again, after a failure), or once the new NRO
-/// is in place asks the loader to start it after this one and returns true: the game quits.
-pub fn press() -> bool {
+/// Starts the download of the available build (again, after a failure).
+pub fn start_download() {
     let mut state = state();
-    match state.status {
-        Status::Available { build } | Status::Failed { build } => {
-            let Some(release) = state.release.clone() else {
-                return false;
-            };
-            state.status = Status::Downloading { build, percent: 0 };
-            drop(state);
-            spawn("update download", move || install(release));
-            false
-        }
-        Status::Installed { .. } => {
-            drop(state);
-            relaunch();
-            true
-        }
-        Status::None | Status::Downloading { .. } => false,
+    let (Status::Available { build } | Status::Failed { build }) = state.status else {
+        return;
+    };
+    let Some(release) = state.release.clone() else {
+        return;
+    };
+    state.status = Status::Downloading { build, percent: 0 };
+    drop(state);
+    spawn("update download", move || install(release));
+}
+
+/// Once the new NRO is in place: asks the loader to start it after this one, as the game quits.
+pub fn quit_to_update() {
+    if matches!(status(), Status::Installed { .. }) {
+        relaunch();
     }
 }
 
@@ -162,12 +169,27 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The check: the newest Switch build above this one becomes `Available`.
+/// The build a finished update put in place, if it's this one: the marker [`install`] leaves
+/// beside the NRO, read once and removed. None for any other build (the old NRO started again).
+fn take_update_marker(nro: &Path, current: u32) -> Option<u32> {
+    let marker = sibling(nro, "updated");
+    let text = std::fs::read_to_string(&marker).ok()?;
+    let _ = std::fs::remove_file(&marker);
+    let build: u32 = text.trim().parse().ok()?;
+    (build == current).then_some(build)
+}
+
+/// The check: the newest Switch build above this one becomes `Available`. First, the first launch
+/// after an update says so.
 fn check() {
     let current = current_build();
-    // A download a quit cut short.
     if let Some(nro) = nro_path() {
+        // A download a quit cut short.
         let _ = std::fs::remove_file(sibling(&nro, "download"));
+        if let Some(build) = take_update_marker(&nro, current) {
+            log::info!("Horizon update: this is build {build}, which the last launch installed");
+            state().events.push_back(Event::Updated { build });
+        }
     }
     match newest(&agent(), current) {
         Ok(Some(release)) => {
@@ -180,7 +202,7 @@ fn check() {
             let mut state = state();
             state.status = Status::Available { build };
             state.release = Some(release);
-            state.event = Some(Event::Available { build });
+            state.events.push_back(Event::Available { build });
         }
         Ok(None) => log::info!("Horizon update: {REPO} has no Switch build newer than this build {current}"),
         Err(e) => log::warn!("Horizon update: the check failed: {e}"),
@@ -392,17 +414,22 @@ fn install(release: Release) {
         }
         installed.map(|()| nro)
     })();
-    let mut state = state();
     match result {
         Ok(nro) => {
             log::info!("Horizon update: build {build} is in place at {}; the old one is its .old", nro.display());
+            // The next launch's confirmation (take_update_marker); without it the update still works.
+            if let Err(e) = std::fs::write(sibling(&nro, "updated"), build.to_string()) {
+                log::warn!("Horizon update: no .updated marker: {e}");
+            }
+            let mut state = state();
             state.status = Status::Installed { build };
-            state.event = Some(Event::Installed { build });
+            state.events.push_back(Event::Installed { build });
         }
         Err(Failure { reason, detail }) => {
             log::warn!("Horizon update: installing build {build} failed: {reason}: {detail}");
+            let mut state = state();
             state.status = Status::Failed { build };
-            state.event = Some(Event::Failed { reason });
+            state.events.push_back(Event::Failed { reason });
         }
     }
 }
@@ -668,6 +695,23 @@ mod tests {
         // No download to put in place: the running NRO stays where it was.
         assert!(replace(&nro, &new).is_err());
         assert_eq!(std::fs::read_to_string(&nro).unwrap(), "update");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_installed_build_says_it_was_updated_and_only_once() {
+        let dir = std::env::temp_dir().join(format!("horizon-switch-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nro = dir.join("horizon.nro");
+        let marker = sibling(&nro, "updated");
+        std::fs::write(&marker, "3").unwrap();
+        assert_eq!(take_update_marker(&nro, 3), Some(3));
+        assert!(!marker.exists());
+        assert_eq!(take_update_marker(&nro, 3), None);
+        // The old NRO, started again after an update, doesn't claim it.
+        std::fs::write(&marker, "3").unwrap();
+        assert_eq!(take_update_marker(&nro, 2), None);
+        assert!(!marker.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

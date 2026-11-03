@@ -7,19 +7,27 @@ Other platforms don't use it; they have the launcher.
 
 ## What the player sees
 
-1. With the first title screen of a launch, a background thread asks GitHub's API for the
+1. The title's version line, bottom left, names the build: `Horizon 26.3 (Rust), Switch build N`,
+   or `Switch dev build` for a build that isn't a release.
+2. With the first title screen of a launch, a background thread asks GitHub's API for the
    repository's releases. Without a connection the check fails quietly. Only the log records it.
-2. If there's a newer Switch build, a toast says so, and the title's Realms button (disabled on the
+3. If there's a newer Switch build, a toast says so, and the title's Realms button (disabled on the
    Switch) becomes **Update to build N**.
-3. Pressing it downloads the release's `horizon.nro` next to the running one as
+4. Pressing it asks first: **Update Horizon?**, with the download's size and a note that worlds
+   and settings stay, and **Update** or **Cancel**.
+5. **Update** downloads the release's `horizon.nro` next to the running one as
    `horizon.nro.download`, with the percentage on the button. The download is checked, then the
-   running NRO is renamed to `horizon.nro.old` and the new one takes its name.
-4. The button becomes **Quit to finish the update**. When the game exits through the homebrew
+   running NRO is renamed to `horizon.nro.old` and the new one takes its name. A toast says the
+   build is installed.
+6. The button becomes **Quit to finish the update**. When the game exits through the homebrew
    loader, the loader starts the new NRO right away (`envSetNextLoad`). When the exit goes through
    AM to HOME instead, start Horizon again from hbmenu. That happens when heap pages are still held,
-   for example by an open socket (`horizon-nx` `release_horizon_services`).
-5. If anything fails, a toast gives the reason, the log has the details, and the button changes to
-   **Retry the update**.
+   for example by an open socket (`horizon-nx` `release_horizon_services`); so far that is the usual case.
+7. The new build's first launch shows **Horizon updated: Now on build N**. A `horizon.nro.updated`
+   marker, left by the install and removed as it's read, tells it so. The old NRO, if started
+   instead, doesn't claim it.
+8. If anything fails, a toast gives the reason, the log has the details, and the button changes to
+   **Retry the update**, which retries without asking again.
 
 The game files prepared next to the NRO (`.local/`, `saves/`, `options.txt`) are never touched.
 An update replaces only the NRO.

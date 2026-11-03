@@ -164,12 +164,19 @@ impl WorldToast {
                 lang::get_or("horizon.update.failed", "Update failed"),
                 (*reason).to_owned(),
             ),
+            Self::Update(crate::switch_update::Event::Updated { build }) => (
+                lang::get_or("horizon.update.updated", "Horizon updated"),
+                translate("horizon.update.updated.message", "Now on build %s", &[build]),
+            ),
         }
     }
 }
 
 /// The Main screen's update button (`switch_update`), where Realms' sits.
 const UPDATE: u8 = 8;
+/// The update question's buttons.
+const UPDATE_YES: u8 = 96;
+const UPDATE_NO: u8 = 97;
 
 /// The update button's label and whether it takes a press; none while there's no update.
 fn update_button(status: &crate::switch_update::Status) -> Option<(String, bool)> {
@@ -313,6 +320,10 @@ pub enum Mode {
     },
     /// AccessibilityOnboardingScreen: the first screen of a first launch.
     Onboarding(Onboarding),
+    /// The Switch update's question before it downloads (`switch_update`): the build on offer.
+    ConfirmUpdate {
+        build: u32,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -1393,6 +1404,29 @@ impl Title {
                     ),
                 ]
             }
+            Mode::ConfirmUpdate { .. } => {
+                let y = confirm_top(h, self.message_lines.get())
+                    + 41.0
+                    + self.message_lines.get() as f32 * 9.0;
+                vec![
+                    b(
+                        (w / 2.0).floor() - 152.0,
+                        y,
+                        150.0,
+                        &lang::get_or("horizon.update.confirm.yes", "Update"),
+                        true,
+                        UPDATE_YES,
+                    ),
+                    b(
+                        (w / 2.0).floor() + 2.0,
+                        y,
+                        150.0,
+                        &lang::get_or("gui.cancel", "Cancel"),
+                        true,
+                        UPDATE_NO,
+                    ),
+                ]
+            }
             Mode::Recover { issues, .. } => {
                 let y = recover_buttons_top(h, self.message_lines.get());
                 // The restore button is active only when level.dat is the broken one
@@ -1578,7 +1612,15 @@ impl Title {
                         ];
                     }
                 }
-                let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
+                let mut version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
+                // The Switch build names itself: what an update changes.
+                if cfg!(target_os = "horizon") {
+                    let build = match crate::switch_update::current_build() {
+                        0 => lang::get_or("horizon.update.dev_build", "Switch dev build"),
+                        build => translate("horizon.update.build", "Switch build %s", &[&build]),
+                    };
+                    version = format!("{version}, {build}");
+                }
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
                 // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
                 // scale, so screenshots and reports say which build they come from.
@@ -1956,6 +1998,30 @@ impl Title {
                     centered(atlas, batch, line, top + 17.0 + i as f32 * 9.0, u32::MAX);
                 }
             }
+            Mode::ConfirmUpdate { build } => {
+                crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
+                let size = crate::switch_update::download_size().map_or_else(String::new, |bytes| {
+                    format!(" ({:.0} MB)", bytes as f64 / 1_048_576.0)
+                });
+                let message = translate(
+                    "horizon.update.confirm.message",
+                    "Build %s%s downloads now, then replaces this version when you quit Horizon. Your worlds and settings stay as they are.",
+                    &[build, &size],
+                );
+                let lines = wrapped(atlas, &message, w - 50.0);
+                self.message_lines.set(lines.len());
+                let top = confirm_top(h, lines.len());
+                centered(
+                    atlas,
+                    batch,
+                    &lang::get_or("horizon.update.confirm.title", "Update Horizon?"),
+                    top,
+                    u32::MAX,
+                );
+                for (i, line) in lines.iter().enumerate() {
+                    centered(atlas, batch, line, top + 17.0 + i as f32 * 9.0, u32::MAX);
+                }
+            }
             Mode::Backup { .. } => {
                 self.backup_shown.set(true);
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
@@ -2243,13 +2309,7 @@ impl Title {
                 Action::None
             }
             (Mode::Main, Some(2)) => Action::Quit,
-            (Mode::Main, Some(UPDATE)) => {
-                if crate::switch_update::press() {
-                    Action::Quit
-                } else {
-                    Action::None
-                }
-            }
+            (Mode::Main, Some(UPDATE)) => self.update_click(),
             (Mode::Main, Some(4)) => {
                 // TitleScreen.init: SafetyScreen first, unless it was turned off.
                 self.mode = if self.skip_multiplayer_warning {
@@ -2315,6 +2375,15 @@ impl Title {
             },
             (Mode::LowDiskSpace { .. }, Some(95)) => {
                 self.escape();
+                Action::None
+            }
+            (Mode::ConfirmUpdate { .. }, Some(UPDATE_YES)) => {
+                self.mode = Mode::Main;
+                crate::switch_update::start_download();
+                Action::None
+            }
+            (Mode::ConfirmUpdate { .. }, Some(UPDATE_NO)) => {
+                self.mode = Mode::Main;
                 Action::None
             }
             (Mode::BackupBeforeUpgrade { world, .. }, Some(42)) => {
@@ -2811,6 +2880,26 @@ impl Title {
             // Screen.keyPressed: Escape closes the screen, which fades out.
             Mode::Onboarding(_) => self.onboarding_close(),
             _ => self.mode = Mode::Main,
+        }
+    }
+    /// The Main screen's update button: asks before a download, retries one that failed without
+    /// asking again, or quits so that the installed build starts.
+    fn update_click(&mut self) -> Action {
+        use crate::switch_update::{self as update, Status};
+        match update::status() {
+            Status::Available { build } => {
+                self.mode = Mode::ConfirmUpdate { build };
+                Action::None
+            }
+            Status::Failed { .. } => {
+                update::start_download();
+                Action::None
+            }
+            Status::Installed { .. } => {
+                update::quit_to_update();
+                Action::Quit
+            }
+            Status::None | Status::Downloading { .. } => Action::None,
         }
     }
     /// `JoinMultiplayerScreen.keyPressed`: F5 refreshes the server list as
