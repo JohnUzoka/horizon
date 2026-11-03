@@ -198,6 +198,81 @@ pub enum Done {
     Meshed(i32, i32, i32, SectionMesh, u64),
     Saved(Vec<((i32, i32), Proto)>),
 }
+/// The Switch port's world-generation timing (OPTIMIZATIONS.md O23): every chunk job's kind and
+/// time on a worker, logged every ten seconds. `/pregen` makes a repeatable load of it.
+#[cfg(target_os = "horizon")]
+mod job_stats {
+    use super::{Done, Job};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// The jobs a chunk passes through, as the log names them: loaded (a chunk or a decorated
+    /// proto chunk from the save) or generated (the noise, the surface, the carvers), decorated,
+    /// finished, lit, meshed (a section), and save batches.
+    const KINDS: [&str; 7] = ["loaded", "generated", "decorated", "finished", "lit", "meshed", "saves"];
+
+    /// `job`'s kind before it runs; Generate's is settled by its result.
+    pub(super) fn kind(job: &Job) -> Option<usize> {
+        Some(match job {
+            Job::Generate(..) => 1,
+            Job::Decorate(..) => 2,
+            Job::Finish(_) => 3,
+            Job::Light(..) => 4,
+            Job::Mesh(..) => 5,
+            Job::Save(_) => 6,
+            Job::Free(_) => return None,
+        })
+    }
+
+    struct Sums {
+        since: Option<Instant>,
+        count: [u32; 7],
+        time: [Duration; 7],
+    }
+
+    static SUMS: Mutex<Sums> = Mutex::new(Sums {
+        since: None,
+        count: [0; 7],
+        time: [Duration::ZERO; 7],
+    });
+
+    /// A job of `kind` took `time` and gave `done`; ten seconds after the last report, the sums
+    /// go to the log.
+    pub(super) fn add(kind: usize, done: &Done, time: Duration) {
+        let kind = match done {
+            Done::Generated(_) | Done::Proto(_, _, _, true) if kind == 1 => 0,
+            _ => kind,
+        };
+        let mut s = SUMS.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let since = *s.since.get_or_insert(now);
+        s.count[kind] += 1;
+        s.time[kind] += time;
+        let window = now - since;
+        if window < Duration::from_secs(10) {
+            return;
+        }
+        let jobs: Vec<String> = (0..KINDS.len())
+            .filter(|&k| s.count[k] > 0)
+            .map(|k| {
+                let each = s.time[k].as_secs_f64() * 1000.0 / f64::from(s.count[k]);
+                format!("{} {} ({each:.1} ms each)", s.count[k], KINDS[k])
+            })
+            .collect();
+        let busy: Duration = s.time.iter().sum();
+        log::info!(
+            "Horizon: chunk jobs over the last {:.1} s: {}; workers busy {:.2} cores",
+            window.as_secs_f64(),
+            jobs.join(", "),
+            busy.as_secs_f64() / window.as_secs_f64(),
+        );
+        *s = Sums {
+            since: Some(now),
+            count: [0; 7],
+            time: [Duration::ZERO; 7],
+        };
+    }
+}
 struct Queued {
     priority: i64,
     /// The column the job is for and what it adds to the column's distance
@@ -601,6 +676,8 @@ impl Streaming {
                                     }
                                 }
                             };
+                            #[cfg(target_os = "horizon")]
+                            let timing = (job_stats::kind(&job), std::time::Instant::now());
                             let done = match job {
                                 Job::Generate(x, z) => match generator.load(x, z) {
                                     Some(chunk) => {
@@ -661,6 +738,10 @@ impl Streaming {
                                     Done::Meshed(x, sy, z, mesh, seq)
                                 }
                             };
+                            #[cfg(target_os = "horizon")]
+                            if let (Some(kind), started) = timing {
+                                job_stats::add(kind, &done, started.elapsed());
+                            }
                             shared.done.send(done);
                         }
                     })
