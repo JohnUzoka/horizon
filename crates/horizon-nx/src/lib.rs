@@ -39,10 +39,14 @@ pub use compat::{
 pub use boost::loading_world;
 #[cfg(target_os = "horizon")]
 pub use keyboard::software_keyboard;
+#[cfg(target_os = "horizon")]
+pub use lifecycle::relaunch_on_exit;
 pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
     suspend_until_out_of_background,
 };
+#[cfg(target_os = "horizon")]
+pub use logging::nro_path;
 pub use logging::{flush_switch_logs, init_switch_logging, nro_dir};
 
 /// One line on the malloc heap: what malloc has in use and has taken from the heap, and how

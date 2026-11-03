@@ -27,6 +27,10 @@ mod ffi {
         /// end the process, as libnx always does for an NSO. An application asks with
         /// `ISelfController::Exit`, a library applet with `ExitProcessAndReturn`.
         pub static mut __nx_applet_exit_mode: u32;
+        /// libnx `env.h`: whether the homebrew loader takes an NRO to start after this one, and
+        /// setting it (copied into the loader's buffers, as hbmenu does for the NRO picked in it).
+        pub fn envHasNextLoad() -> bool;
+        pub fn envSetNextLoad(path: *const c_char, argv: *const c_char) -> u32;
     }
 
     /// libnx `Service` (switch/sf/service.h). `session` is 0 while the service is closed.
@@ -179,6 +183,22 @@ pub fn init_horizon_services() {
             log::info!("BSD socket layer initialized successfully");
         }
     }
+}
+
+/// Asks the homebrew loader to start the NRO at `path` (with `path` as its `argv[0]`) once this
+/// one ends, instead of going back to hbmenu. False if the loader takes no next NRO
+/// (`envHasNextLoad`). Only an exit through the loader starts it: one through AM to HOME
+/// ([`release_horizon_services`], when heap pages are still locked) ends the process, and the
+/// NRO has to be started again from hbmenu.
+#[cfg(target_os = "horizon")]
+pub fn relaunch_on_exit(path: &str) -> bool {
+    // libnx's argvSetup splits argv at spaces, except inside quotes.
+    let argv = if path.contains(' ') { format!("\"{path}\"") } else { path.to_owned() };
+    let (Ok(path), Ok(argv)) = (std::ffi::CString::new(path), std::ffi::CString::new(argv)) else {
+        return false;
+    };
+    // SAFETY: libnx copies both strings before returning.
+    unsafe { ffi::envHasNextLoad() && ffi::envSetNextLoad(path.as_ptr(), argv.as_ptr()) == 0 }
 }
 
 /// Undoes `init_horizon_services` and checks that the homebrew loader can read the next NRO into

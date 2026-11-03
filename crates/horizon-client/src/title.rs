@@ -126,6 +126,8 @@ enum WorldToast {
     Failed(String),
     /// `SystemToast.onWorldAccessFailure`: the folder of a world that couldn't be locked.
     AccessFailure(String),
+    /// The Switch build's update notices (`switch_update`).
+    Update(crate::switch_update::Event),
 }
 impl WorldToast {
     fn text(&self) -> (String, String) {
@@ -146,8 +148,52 @@ impl WorldToast {
                 lang::get_or("selectWorld.access_failure", "Failed to access world"),
                 folder.clone(),
             ),
+            Self::Update(crate::switch_update::Event::Available { build }) => (
+                lang::get_or("horizon.update.available", "Update available"),
+                translate(
+                    "horizon.update.available.message",
+                    "Horizon build %s: Update on the title screen",
+                    &[build],
+                ),
+            ),
+            Self::Update(crate::switch_update::Event::Installed { build }) => (
+                translate("horizon.update.installed", "Build %s installed", &[build]),
+                lang::get_or("horizon.update.installed.message", "Quit Horizon to start it"),
+            ),
+            Self::Update(crate::switch_update::Event::Failed { reason }) => (
+                lang::get_or("horizon.update.failed", "Update failed"),
+                (*reason).to_owned(),
+            ),
         }
     }
+}
+
+/// The Main screen's update button (`switch_update`), where Realms' sits.
+const UPDATE: u8 = 8;
+
+/// The update button's label and whether it takes a press; none while there's no update.
+fn update_button(status: &crate::switch_update::Status) -> Option<(String, bool)> {
+    use crate::switch_update::Status;
+    Some(match status {
+        Status::None => return None,
+        Status::Available { build } => (
+            translate("horizon.update.button", "Update to build %s", &[build]),
+            true,
+        ),
+        Status::Downloading { build, percent } => (
+            translate(
+                "horizon.update.downloading",
+                "Downloading build %s: %s%%",
+                &[build, percent],
+            ),
+            false,
+        ),
+        Status::Installed { .. } => (
+            lang::get_or("horizon.update.quit", "Quit to finish the update"),
+            true,
+        ),
+        Status::Failed { .. } => (lang::get_or("horizon.update.retry", "Retry the update"), true),
+    })
 }
 
 /// Why `WorldOpenFlows.askForBackup` asks before a world opens.
@@ -471,6 +517,8 @@ fn choose_splash(text: &str, index: usize, date: (u32, u32)) -> Option<String> {
 impl Title {
     pub fn new(saves: PathBuf, resources: &Path) -> Self {
         use chrono::Datelike;
+        // The Switch build's one update check a launch, with the first title screen.
+        crate::switch_update::start_check();
         let today = chrono::Local::now();
         let mode = Mode::Main;
         let now = std::time::Instant::now();
@@ -789,6 +837,14 @@ impl Title {
             self.toast = Some((crate::toasts::Slide::default(), toast));
         }
     }
+    /// The Switch update's newest notice as the title's toast, once the toast is free.
+    pub fn poll_update(&mut self) {
+        if self.toast.is_none()
+            && let Some(event) = crate::switch_update::take_event()
+        {
+            self.toast = Some((crate::toasts::Slide::default(), WorldToast::Update(event)));
+        }
+    }
     /// `ToastManager.update` for the system toast: slides it in, keeps it
     /// for 5 s times the notification display time, slides it out. The
     /// sound of a new visibility (`Toast.Visibility`), if any.
@@ -1105,14 +1161,20 @@ impl Title {
                         true,
                         4,
                     ),
-                    b(
-                        cx - 100.0,
-                        y + 48.0,
-                        200.0,
-                        &lang::get_or("menu.online", "Minecraft Realms"),
-                        false,
-                        0,
-                    ),
+                    // On the Switch an update stands in for Realms (switch_update).
+                    match update_button(&crate::switch_update::status()) {
+                        Some((label, enabled)) => {
+                            b(cx - 100.0, y + 48.0, 200.0, &label, enabled, UPDATE)
+                        }
+                        None => b(
+                            cx - 100.0,
+                            y + 48.0,
+                            200.0,
+                            &lang::get_or("menu.online", "Minecraft Realms"),
+                            false,
+                            0,
+                        ),
+                    },
                     b(
                         cx - 100.0,
                         y + 96.0,
@@ -2181,6 +2243,13 @@ impl Title {
                 Action::None
             }
             (Mode::Main, Some(2)) => Action::Quit,
+            (Mode::Main, Some(UPDATE)) => {
+                if crate::switch_update::press() {
+                    Action::Quit
+                } else {
+                    Action::None
+                }
+            }
             (Mode::Main, Some(4)) => {
                 // TitleScreen.init: SafetyScreen first, unless it was turned off.
                 self.mode = if self.skip_multiplayer_warning {

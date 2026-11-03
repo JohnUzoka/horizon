@@ -229,7 +229,7 @@ fn set_asset_root(nro_path: Option<&str>, app_name: &str) {
 
 /// `argv[0]`, the path the NRO was launched from, as parsed by libnx's `argvSetup`.
 #[cfg(target_os = "horizon")]
-fn nro_path() -> Option<&'static str> {
+pub fn nro_path() -> Option<&'static str> {
     unsafe {
         if ffi::__system_argc < 1 || ffi::__system_argv.is_null() || (*ffi::__system_argv).is_null() {
             return None;

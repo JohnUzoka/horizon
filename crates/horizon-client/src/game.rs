@@ -6964,6 +6964,7 @@ impl Game<'_> {
         }
         if let Some(title) = &mut self.title {
             title.poll_backup();
+            title.poll_update();
             if std::mem::take(&mut title.onboarding_finished) {
                 // Options.onboardingAccessibilityFinished.
                 self.settings.file.set(
