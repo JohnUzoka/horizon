@@ -9,7 +9,8 @@
 //! `-lnx -lsysbase -lc -lm -lgcc` that nothing else in the Horizon graph emits.
 //!
 //! `init` runs the service setup (romfs, BSD sockets, applet focus mode) and starts the log
-//! writer; call it first thing in `main`. `flush_logs` and `process_applet_messages` are for the
+//! writer; call it first thing in `main`, then hand the game's own main to `run_on_main_stack`
+//! for the 8 MiB stack upstream gives it. `flush_logs` and `process_applet_messages` are for the
 //! game loop (Phase 2); `software_keyboard` shows the system keyboard for text entry.
 
 pub mod compat;
@@ -30,6 +31,8 @@ mod boost;
 mod clocks;
 #[cfg(target_os = "horizon")]
 mod keyboard;
+#[cfg(target_os = "horizon")]
+mod main_stack;
 
 pub use compat::{
     ThreadCorePolicy, set_thread_core_policy, set_thread_logging, thread_core_policy,
@@ -41,6 +44,8 @@ pub use boost::loading_world;
 pub use keyboard::software_keyboard;
 #[cfg(target_os = "horizon")]
 pub use lifecycle::relaunch_on_exit;
+#[cfg(target_os = "horizon")]
+pub use main_stack::run_on_main_stack;
 pub use lifecycle::{
     flush_logs, init_horizon_services, process_applet_messages, register_release_hook,
     suspend_until_out_of_background,

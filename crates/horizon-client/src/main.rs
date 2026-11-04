@@ -25,5 +25,10 @@ fn main() {
     #[cfg(target_os = "horizon")]
     horizon_nx::init();
     std::hint::black_box(&MOD_API_LEVEL);
+    // Switch: the 8 MiB main-thread stack the other platforms give the game (build.rs), in place
+    // of the homebrew loader's smaller one (horizon-nx's `main_stack.rs`).
+    #[cfg(target_os = "horizon")]
+    horizon_nx::run_on_main_stack(horizon_client::entry::main);
+    #[cfg(not(target_os = "horizon"))]
     horizon_client::entry::main();
 }
