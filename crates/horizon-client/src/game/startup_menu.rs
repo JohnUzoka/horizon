@@ -1558,10 +1558,17 @@ impl Loading {
     }
 
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
-        let logs = horizon_client::logging::recent_lines();
         let Some(gui) = &self.gui else {
             // The pack's screens do not exist yet: the boot screen holds the
             // window, the wordmark and the console's lines while they load.
+            // The Switch shows no console: at 720p its log lines (some several
+            // rows long) climb into the wordmark, and laying them out again
+            // every frame takes the main thread from the loaders.
+            let logs = if cfg!(target_os = "horizon") {
+                Vec::new()
+            } else {
+                horizon_client::logging::recent_lines()
+            };
             horizon_client::ui_theme::draw_boot(&self.boot, batch, &logs);
             return;
         };
