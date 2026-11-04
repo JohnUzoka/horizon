@@ -1,15 +1,16 @@
 //! The Switch build's updates (docs/switch-updates.md). Once a launch the NRO asks GitHub for
-//! [`REPO`]'s releases; a newer Switch build turns the title screen's Realms button into an update
-//! button. Pressing it asks first, then downloads the release's `horizon.nro` beside the running
-//! one, checks it against the release's SHA-256 and GitHub's own digest of the file, keeps the
-//! running NRO as `<name>.nro.old` and puts the new one in its place; quitting then starts it
+//! [`REPO`]'s releases; a newer Switch release turns the title screen's Realms button into an
+//! update button. Pressing it asks first, then downloads the release's `horizon.nro` beside the
+//! running one, checks it against the release's SHA-256 and GitHub's own digest of the file, keeps
+//! the running NRO as `<name>.nro.old` and puts the new one in its place; quitting then starts it
 //! through the homebrew loader where the loader can, and on the next launch otherwise. That launch
 //! says it was updated (a `.updated` marker beside the NRO).
 //!
-//! Skate 3's release updater protocol 1, for one file: releases come only from [`REPO`]'s API,
-//! over HTTPS (redirects too), downloads only from its release downloads and within size limits,
-//! each release names its repository, target, tag and build in a `release.json`, and no token is
-//! ever sent. Off the Switch nothing here starts: the desktop game has the launcher.
+//! Skate 3's release updater protocol, for one file and with versions where it has build numbers
+//! (`release.json` schema 2): releases come only from [`REPO`]'s API, over HTTPS (redirects too),
+//! downloads only from its release downloads and within size limits, each release names its
+//! repository, target, tag and version in a `release.json`, and no token is ever sent. Off the
+//! Switch nothing here starts: the desktop game has the launcher.
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -23,8 +24,8 @@ use sha2::{Digest, Sha256};
 
 /// The only repository updates come from.
 pub const REPO: &str = "JohnUzoka/horizon";
-/// What a Switch release is tagged: `switch-<build>`.
-const TAG_PREFIX: &str = "switch-";
+/// What a Switch release is tagged: `v<version>`, as `v0.1.0`.
+const TAG_PREFIX: &str = "v";
 /// `release.json`'s target.
 const TARGET: &str = "switch";
 /// The release's assets: the program, its `sha256sum` line, and the release's identity.
@@ -36,12 +37,40 @@ const MAX_PACKAGE: u64 = 256 << 20;
 /// Release lists are read 100 releases a page, up to this many pages.
 const MAX_PAGES: u32 = 10;
 
-/// This NRO's build: `HORIZON_SWITCH_BUILD` when it was built (`scripts/hx-release.sh` in the
-/// port's workshop), 0 for a development build, which any release updates.
-pub fn current_build() -> u32 {
-    option_env!("HORIZON_SWITCH_BUILD")
-        .and_then(|build| build.parse().ok())
-        .unwrap_or(0)
+/// A release's version, `major.minor.patch`, compared part by part (0.10.0 is above 0.9.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version(pub u32, pub u32, pub u32);
+
+impl Version {
+    /// A development build's, below every release.
+    pub const DEVELOPMENT: Version = Version(0, 0, 0);
+
+    /// `major.minor.patch`: three numbers without leading zeros, and nothing after them.
+    pub fn parse(text: &str) -> Option<Version> {
+        let mut parts = text.split('.').map(|part| {
+            (!part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0')))
+            .then(|| part.parse().ok())
+            .flatten()
+        });
+        let version = Version(parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(version)
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+/// This NRO's version: `HORIZON_SWITCH_VERSION` when it was built (`scripts/hx-release.sh` in the
+/// port's workshop); a development build has none, and any release updates it.
+pub fn current_version() -> Version {
+    option_env!("HORIZON_SWITCH_VERSION")
+        .and_then(Version::parse)
+        .unwrap_or(Version::DEVELOPMENT)
 }
 
 /// Where the update stands, for the title's button.
@@ -49,25 +78,25 @@ pub fn current_build() -> u32 {
 pub enum Status {
     /// Not checked yet, checking, or nothing newer: the title keeps its Realms button.
     None,
-    /// A newer build is published.
-    Available { build: u32 },
+    /// A newer release is published.
+    Available { version: Version },
     /// Its NRO is downloading.
-    Downloading { build: u32, percent: u8 },
+    Downloading { version: Version, percent: u8 },
     /// The new NRO is in place; the next start runs it.
-    Installed { build: u32 },
+    Installed { version: Version },
     /// The download or install failed; pressing again retries.
-    Failed { build: u32 },
+    Failed { version: Version },
 }
 
 /// What the title shows as a toast, each once, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Available { build: u32 },
-    Installed { build: u32 },
+    Available { version: Version },
+    Installed { version: Version },
     /// Why, in a few words; the log has the details.
     Failed { reason: &'static str },
-    /// The first launch of the build an update installed.
-    Updated { build: u32 },
+    /// The first launch of the version an update installed.
+    Updated { version: Version },
 }
 
 struct State {
@@ -109,16 +138,16 @@ pub fn start_check() {
     }
 }
 
-/// Starts the download of the available build (again, after a failure).
+/// Starts the download of the available release (again, after a failure).
 pub fn start_download() {
     let mut state = state();
-    let (Status::Available { build } | Status::Failed { build }) = state.status else {
+    let (Status::Available { version } | Status::Failed { version }) = state.status else {
         return;
     };
     let Some(release) = state.release.clone() else {
         return;
     };
-    state.status = Status::Downloading { build, percent: 0 };
+    state.status = Status::Downloading { version, percent: 0 };
     drop(state);
     spawn("update download", move || install(release));
 }
@@ -169,42 +198,42 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The build a finished update put in place, if it's this one: the marker [`install`] leaves
-/// beside the NRO, read once and removed. None for any other build (the old NRO started again).
-fn take_update_marker(nro: &Path, current: u32) -> Option<u32> {
+/// The version a finished update put in place, if it's this one: the marker [`install`] leaves
+/// beside the NRO, read once and removed. None for any other version (the old NRO started again).
+fn take_update_marker(nro: &Path, current: Version) -> Option<Version> {
     let marker = sibling(nro, "updated");
     let text = std::fs::read_to_string(&marker).ok()?;
     let _ = std::fs::remove_file(&marker);
-    let build: u32 = text.trim().parse().ok()?;
-    (build == current).then_some(build)
+    let version = Version::parse(text.trim())?;
+    (version == current).then_some(version)
 }
 
-/// The check: the newest Switch build above this one becomes `Available`. First, the first launch
-/// after an update says so.
+/// The check: the newest Switch release above this one becomes `Available`. First, the first
+/// launch after an update says so.
 fn check() {
-    let current = current_build();
+    let current = current_version();
     if let Some(nro) = nro_path() {
         // A download a quit cut short.
         let _ = std::fs::remove_file(sibling(&nro, "download"));
-        if let Some(build) = take_update_marker(&nro, current) {
-            log::info!("Horizon update: this is build {build}, which the last launch installed");
-            state().events.push_back(Event::Updated { build });
+        if let Some(version) = take_update_marker(&nro, current) {
+            log::info!("Horizon update: this is {version}, which the last launch installed");
+            state().events.push_back(Event::Updated { version });
         }
     }
     match newest(&agent(), current) {
         Ok(Some(release)) => {
             log::info!(
-                "Horizon update: {REPO} has build {} ({}), newer than this build {current}",
-                release.build,
+                "Horizon update: {REPO} has {} ({}), newer than this version {current}",
+                release.version,
                 release.tag
             );
-            let build = release.build;
+            let version = release.version;
             let mut state = state();
-            state.status = Status::Available { build };
+            state.status = Status::Available { version };
             state.release = Some(release);
-            state.events.push_back(Event::Available { build });
+            state.events.push_back(Event::Available { version });
         }
-        Ok(None) => log::info!("Horizon update: {REPO} has no Switch build newer than this build {current}"),
+        Ok(None) => log::info!("Horizon update: {REPO} has no Switch release newer than this version {current}"),
         Err(e) => log::warn!("Horizon update: the check failed: {e}"),
     }
 }
@@ -220,25 +249,22 @@ struct Asset {
 /// A Switch release on GitHub.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Release {
-    build: u32,
+    version: Version,
     tag: String,
     package: Asset,
     checksum: Asset,
     manifest: Asset,
 }
 
-/// `switch-<build>`, with a build from 1 written without leading zeros.
-fn tag_build(tag: &str) -> Option<u32> {
-    let digits = tag.strip_prefix(TAG_PREFIX)?;
-    let build: u32 = digits.parse().ok()?;
-    (build > 0 && digits.bytes().all(|b| b.is_ascii_digit()) && !digits.starts_with('0'))
-        .then_some(build)
+/// `v<version>`, never the development build's 0.0.0.
+fn tag_version(tag: &str) -> Option<Version> {
+    Version::parse(tag.strip_prefix(TAG_PREFIX)?).filter(|&version| version > Version::DEVELOPMENT)
 }
 
-/// The Switch releases on one page of GitHub's release list with a build above `current`:
-/// published (not drafts, not pre-releases), tagged `switch-<build>`, with all three assets
-/// uploaded, each downloading from this repository's release downloads.
-fn candidates(page: &Value, current: u32) -> Vec<Release> {
+/// The Switch releases on one page of GitHub's release list with a version above `current`:
+/// published (not drafts, not pre-releases), tagged `v<version>`, with all three assets uploaded,
+/// each downloading from this repository's release downloads.
+fn candidates(page: &Value, current: Version) -> Vec<Release> {
     let Some(releases) = page.as_array() else {
         return Vec::new();
     };
@@ -252,7 +278,7 @@ fn candidates(page: &Value, current: u32) -> Vec<Release> {
                 return None;
             }
             let tag = release["tag_name"].as_str()?;
-            let build = tag_build(tag).filter(|&build| build > current)?;
+            let version = tag_version(tag).filter(|&version| version > current)?;
             let assets = release["assets"].as_array()?;
             let asset = |name: &str| {
                 let asset = assets
@@ -268,7 +294,7 @@ fn candidates(page: &Value, current: u32) -> Vec<Release> {
                 })
             };
             Some(Release {
-                build,
+                version,
                 tag: tag.to_owned(),
                 package: asset(PACKAGE)?,
                 checksum: asset(CHECKSUM)?,
@@ -278,17 +304,17 @@ fn candidates(page: &Value, current: u32) -> Vec<Release> {
         .collect()
 }
 
-/// A release's `release.json` must name it: schema 1, the Switch, this repository, its own tag
-/// and build, and the 40-digit commit it was built from.
+/// A release's `release.json` must name it: schema 2, the Switch, this repository, its own tag
+/// and version, and the 40-digit commit it was built from.
 fn check_manifest(text: &[u8], release: &Release) -> Result<(), String> {
     let manifest: Value =
         serde_json::from_slice(text).map_err(|e| format!("{}'s {MANIFEST}: {e}", release.tag))?;
     let revision = manifest["revision"].as_str().unwrap_or_default();
-    let matches = manifest["schema"] == 1
+    let matches = manifest["schema"] == 2
         && manifest["target"] == TARGET
         && manifest["repository"] == REPO
         && manifest["tag"] == release.tag.as_str()
-        && manifest["build"].as_u64() == Some(u64::from(release.build))
+        && manifest["version"] == release.version.to_string().as_str()
         && revision.len() == 40
         && revision.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     if matches {
@@ -327,7 +353,7 @@ fn agent() -> ureq::Agent {
         .https_only(true)
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(30))
-        .user_agent(&format!("horizon-switch/{}", current_build()))
+        .user_agent(&format!("horizon-switch/{}", current_version()))
         .build()
 }
 
@@ -367,7 +393,7 @@ fn fetch(agent: &ureq::Agent, url: &str, api: bool, limit: u64) -> Result<Vec<u8
 }
 
 /// The newest Switch release above `current` whose `release.json` checks out.
-fn newest(agent: &ureq::Agent, current: u32) -> Result<Option<Release>, String> {
+fn newest(agent: &ureq::Agent, current: Version) -> Result<Option<Release>, String> {
     let mut found = Vec::new();
     for page in 1..=MAX_PAGES {
         let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=100&page={page}");
@@ -376,7 +402,7 @@ fn newest(agent: &ureq::Agent, current: u32) -> Result<Option<Release>, String> 
         found.extend(candidates(&list, current));
         // A short page is the last; never settle on a release from a cut-off list.
         if list.as_array().is_some_and(|releases| releases.len() < 100) {
-            found.sort_by(|a, b| b.build.cmp(&a.build));
+            found.sort_by(|a, b| b.version.cmp(&a.version));
             for release in found {
                 match fetch(agent, &release.manifest.url, false, 64 << 10)
                     .and_then(|text| check_manifest(&text, &release))
@@ -401,7 +427,7 @@ fn failure(reason: &'static str) -> impl FnOnce(String) -> Failure {
 }
 
 fn install(release: Release) {
-    let build = release.build;
+    let version = release.version;
     let result = (|| {
         let nro = nro_path().ok_or_else(|| Failure {
             reason: "this NRO's path is unknown",
@@ -416,19 +442,19 @@ fn install(release: Release) {
     })();
     match result {
         Ok(nro) => {
-            log::info!("Horizon update: build {build} is in place at {}; the old one is its .old", nro.display());
+            log::info!("Horizon update: {version} is in place at {}; the old one is its .old", nro.display());
             // The next launch's confirmation (take_update_marker); without it the update still works.
-            if let Err(e) = std::fs::write(sibling(&nro, "updated"), build.to_string()) {
+            if let Err(e) = std::fs::write(sibling(&nro, "updated"), version.to_string()) {
                 log::warn!("Horizon update: no .updated marker: {e}");
             }
             let mut state = state();
-            state.status = Status::Installed { build };
-            state.events.push_back(Event::Installed { build });
+            state.status = Status::Installed { version };
+            state.events.push_back(Event::Installed { version });
         }
         Err(Failure { reason, detail }) => {
-            log::warn!("Horizon update: installing build {build} failed: {reason}: {detail}");
+            log::warn!("Horizon update: installing {version} failed: {reason}: {detail}");
             let mut state = state();
-            state.status = Status::Failed { build };
+            state.status = Status::Failed { version };
             state.events.push_back(Event::Failed { reason });
         }
     }
@@ -456,7 +482,7 @@ fn download_and_replace(release: &Release, nro: &Path, new: &Path) -> Result<(),
         let percent = (done.min(total) * 100 / total) as u8;
         if percent != shown {
             shown = percent;
-            state().status = Status::Downloading { build: release.build, percent };
+            state().status = Status::Downloading { version: release.version, percent };
         }
     })
     .map_err(|e| format!("{}: {e}", release.package.url))
@@ -570,67 +596,89 @@ mod tests {
             "assets": [asset(tag, PACKAGE), asset(tag, CHECKSUM), asset(tag, MANIFEST)],
         })
     }
-    fn builds(page: Value, current: u32) -> Vec<u32> {
-        candidates(&page, current).iter().map(|r| r.build).collect()
+    fn versions(page: Value, current: Version) -> Vec<String> {
+        candidates(&page, current).iter().map(|r| r.version.to_string()).collect()
     }
 
     #[test]
-    fn only_published_switch_releases_above_this_build() {
-        let mut draft = release("switch-9");
+    fn only_published_switch_releases_above_this_version() {
+        let mut draft = release("v0.9.0");
         draft["draft"] = json!(true);
-        let mut pre = release("switch-8");
+        let mut pre = release("v0.8.0");
         pre["prerelease"] = json!(true);
-        let mut unpublished = release("switch-7");
+        let mut unpublished = release("v0.7.0");
         unpublished["published_at"] = Value::Null;
         let page = json!([
-            release("switch-2"),
+            release("v0.2.0"),
             draft,
             pre,
             unpublished,
-            release("switch-5"),
-            release("v0.3.0"),
-            release("switch-03"),
-            release("switch-0"),
-            release("switch-+4"),
-            release("switch-1"),
+            release("v0.10.0"),
+            // The old scheme, and versions written any other way.
+            release("switch-3"),
+            release("v0.03.0"),
+            release("v0.0.0"),
+            release("v+0.4.0"),
+            release("v1.0.0-rc1"),
+            release("v0.4"),
+            release("0.4.0"),
+            release("v0.1.0"),
         ]);
-        assert_eq!(builds(page.clone(), 0), [2, 5, 1]);
-        assert_eq!(builds(page.clone(), 2), [5]);
-        assert_eq!(builds(page, 5), Vec::<u32>::new());
+        let dev = Version::DEVELOPMENT;
+        assert_eq!(versions(page.clone(), dev), ["0.2.0", "0.10.0", "0.1.0"]);
+        // Part by part: 0.10.0 is above 0.9.0 and 0.2.0, which comparing text would get wrong.
+        assert_eq!(versions(page.clone(), Version(0, 9, 0)), ["0.10.0"]);
+        assert_eq!(versions(page.clone(), Version(0, 2, 0)), ["0.10.0"]);
+        assert_eq!(versions(page, Version(0, 10, 0)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_version_is_three_plain_numbers() {
+        assert_eq!(Version::parse("0.1.0"), Some(Version(0, 1, 0)));
+        assert_eq!(Version::parse("12.0.3"), Some(Version(12, 0, 3)));
+        for bad in [
+            "", "0.1", "0.1.0.0", "0.01.0", "0.1.0-rc1", "0.1.+0", "0..1", "v0.1.0",
+            "4294967296.0.0",
+        ] {
+            assert_eq!(Version::parse(bad), None, "{bad}");
+        }
+        assert_eq!(Version(0, 1, 0).to_string(), "0.1.0");
     }
 
     #[test]
     fn a_release_needs_all_three_assets_uploaded_from_its_own_downloads() {
-        let mut missing = release("switch-3");
+        let mut missing = release("v0.3.0");
         missing["assets"].as_array_mut().unwrap().remove(1);
-        let mut uploading = release("switch-4");
+        let mut uploading = release("v0.4.0");
         uploading["assets"][0]["state"] = json!("starter");
-        let mut elsewhere = release("switch-5");
+        let mut elsewhere = release("v0.5.0");
         elsewhere["assets"][0]["browser_download_url"] =
-            json!("https://example.com/JohnUzoka/horizon/releases/download/switch-5/horizon.nro");
-        let mut other_tag = release("switch-6");
+            json!("https://example.com/JohnUzoka/horizon/releases/download/v0.5.0/horizon.nro");
+        let mut other_tag = release("v0.6.0");
         other_tag["assets"][2]["browser_download_url"] = json!(format!(
-            "https://github.com/{REPO}/releases/download/switch-1/{MANIFEST}"
+            "https://github.com/{REPO}/releases/download/v0.1.0/{MANIFEST}"
         ));
-        let page = json!([missing, uploading, elsewhere, other_tag, release("switch-2")]);
-        assert_eq!(builds(page, 0), [2]);
+        let page = json!([missing, uploading, elsewhere, other_tag, release("v0.2.0")]);
+        assert_eq!(versions(page, Version::DEVELOPMENT), ["0.2.0"]);
     }
 
     #[test]
     fn the_manifest_must_name_its_own_release() {
-        let release = candidates(&json!([release("switch-4")]), 0).remove(0);
+        let release = candidates(&json!([release("v0.4.0")]), Version::DEVELOPMENT).remove(0);
         let good = json!({
-            "schema": 1, "target": "switch", "repository": REPO, "build": 4, "tag": "switch-4",
+            "schema": 2, "target": "switch", "repository": REPO,
+            "version": "0.4.0", "tag": "v0.4.0",
             "revision": "0123456789abcdef0123456789abcdef01234567",
         });
         assert!(check_manifest(good.to_string().as_bytes(), &release).is_ok());
         for (key, value) in [
-            ("schema", json!(2)),
+            ("schema", json!(1)),
             ("target", json!("windows-x64")),
             ("repository", json!("horizon-rust/horizon")),
-            ("build", json!(5)),
-            ("build", json!("4")),
-            ("tag", json!("switch-5")),
+            ("version", json!("0.5.0")),
+            ("version", json!("v0.4.0")),
+            ("version", json!(4)),
+            ("tag", json!("v0.5.0")),
             ("revision", json!("0123456789ABCDEF0123456789ABCDEF01234567")),
             ("revision", json!("0123456")),
         ] {
@@ -699,18 +747,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_installed_build_says_it_was_updated_and_only_once() {
+    fn only_the_installed_version_says_it_was_updated_and_only_once() {
         let dir = std::env::temp_dir().join(format!("horizon-switch-marker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let nro = dir.join("horizon.nro");
         let marker = sibling(&nro, "updated");
-        std::fs::write(&marker, "3").unwrap();
-        assert_eq!(take_update_marker(&nro, 3), Some(3));
+        std::fs::write(&marker, "0.3.0").unwrap();
+        assert_eq!(take_update_marker(&nro, Version(0, 3, 0)), Some(Version(0, 3, 0)));
         assert!(!marker.exists());
-        assert_eq!(take_update_marker(&nro, 3), None);
+        assert_eq!(take_update_marker(&nro, Version(0, 3, 0)), None);
         // The old NRO, started again after an update, doesn't claim it.
-        std::fs::write(&marker, "3").unwrap();
-        assert_eq!(take_update_marker(&nro, 2), None);
+        std::fs::write(&marker, "0.3.0").unwrap();
+        assert_eq!(take_update_marker(&nro, Version(0, 2, 0)), None);
         assert!(!marker.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }

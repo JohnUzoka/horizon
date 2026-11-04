@@ -148,25 +148,25 @@ impl WorldToast {
                 lang::get_or("selectWorld.access_failure", "Failed to access world"),
                 folder.clone(),
             ),
-            Self::Update(crate::switch_update::Event::Available { build }) => (
+            Self::Update(crate::switch_update::Event::Available { version }) => (
                 lang::get_or("horizon.update.available", "Update available"),
                 translate(
                     "horizon.update.available.message",
-                    "Horizon build %s: Update on the title screen",
-                    &[build],
+                    "Horizon %s: Update on the title screen",
+                    &[version],
                 ),
             ),
-            Self::Update(crate::switch_update::Event::Installed { build }) => (
-                translate("horizon.update.installed", "Build %s installed", &[build]),
+            Self::Update(crate::switch_update::Event::Installed { version }) => (
+                translate("horizon.update.installed", "Horizon %s installed", &[version]),
                 lang::get_or("horizon.update.installed.message", "Quit Horizon to start it"),
             ),
             Self::Update(crate::switch_update::Event::Failed { reason }) => (
                 lang::get_or("horizon.update.failed", "Update failed"),
                 (*reason).to_owned(),
             ),
-            Self::Update(crate::switch_update::Event::Updated { build }) => (
+            Self::Update(crate::switch_update::Event::Updated { version }) => (
                 lang::get_or("horizon.update.updated", "Horizon updated"),
-                translate("horizon.update.updated.message", "Now on build %s", &[build]),
+                translate("horizon.update.updated.message", "Now on %s", &[version]),
             ),
         }
     }
@@ -183,15 +183,15 @@ fn update_button(status: &crate::switch_update::Status) -> Option<(String, bool)
     use crate::switch_update::Status;
     Some(match status {
         Status::None => return None,
-        Status::Available { build } => (
-            translate("horizon.update.button", "Update to build %s", &[build]),
+        Status::Available { version } => (
+            translate("horizon.update.button", "Update to %s", &[version]),
             true,
         ),
-        Status::Downloading { build, percent } => (
+        Status::Downloading { version, percent } => (
             translate(
                 "horizon.update.downloading",
-                "Downloading build %s: %s%%",
-                &[build, percent],
+                "Downloading %s: %s%%",
+                &[version, percent],
             ),
             false,
         ),
@@ -320,9 +320,9 @@ pub enum Mode {
     },
     /// AccessibilityOnboardingScreen: the first screen of a first launch.
     Onboarding(Onboarding),
-    /// The Switch update's question before it downloads (`switch_update`): the build on offer.
+    /// The Switch update's question before it downloads (`switch_update`): the version on offer.
     ConfirmUpdate {
-        build: u32,
+        version: crate::switch_update::Version,
     },
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -1615,11 +1615,14 @@ impl Title {
                 let mut version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
                 // The Switch build names itself: what an update changes.
                 if cfg!(target_os = "horizon") {
-                    let build = match crate::switch_update::current_build() {
-                        0 => lang::get_or("horizon.update.dev_build", "Switch dev build"),
-                        build => translate("horizon.update.build", "Switch build %s", &[&build]),
+                    use crate::switch_update::{Version, current_version};
+                    let release = match current_version() {
+                        Version::DEVELOPMENT => {
+                            lang::get_or("horizon.update.dev_build", "Switch dev build")
+                        }
+                        release => translate("horizon.update.version", "Switch %s", &[&release]),
                     };
-                    version = format!("{version}, {build}");
+                    version = format!("{version}, {release}");
                 }
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
                 // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
@@ -1998,15 +2001,15 @@ impl Title {
                     centered(atlas, batch, line, top + 17.0 + i as f32 * 9.0, u32::MAX);
                 }
             }
-            Mode::ConfirmUpdate { build } => {
+            Mode::ConfirmUpdate { version } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
                 let size = crate::switch_update::download_size().map_or_else(String::new, |bytes| {
                     format!(" ({:.0} MB)", bytes as f64 / 1_048_576.0)
                 });
                 let message = translate(
                     "horizon.update.confirm.message",
-                    "Build %s%s downloads now, then replaces this version when you quit Horizon. Your worlds and settings stay as they are.",
-                    &[build, &size],
+                    "Horizon %s%s downloads now, then replaces this version when you quit Horizon. Your worlds and settings stay as they are.",
+                    &[version, &size],
                 );
                 let lines = wrapped(atlas, &message, w - 50.0);
                 self.message_lines.set(lines.len());
@@ -2887,8 +2890,8 @@ impl Title {
     fn update_click(&mut self) -> Action {
         use crate::switch_update::{self as update, Status};
         match update::status() {
-            Status::Available { build } => {
-                self.mode = Mode::ConfirmUpdate { build };
+            Status::Available { version } => {
+                self.mode = Mode::ConfirmUpdate { version };
                 Action::None
             }
             Status::Failed { .. } => {
