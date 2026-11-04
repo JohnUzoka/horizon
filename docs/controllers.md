@@ -235,8 +235,12 @@ the label in the game font, sized to the GUI scale, with two styles:
 
 The style comes from the pad's USB vendor (Sony 054c, Microsoft 045e,
 Nintendo 057e, Valve 28de) unless the controls options force one. Glyphs
-replace key names where a prompt names a key (the controls list, tutorial
-hints, "Press X to dismount") only while the pad is the last-used input.
+replace key names where a prompt names a key (the controls list, "Press X to
+dismount") only while the pad is the last-used input. The tutorial's hints
+that name keys or the mouse (move, look around, punch the tree, open the
+inventory) don't show while the pad is in use, nor ever on the Switch; the
+left stick counts as moving and the right stick as looking around, so the
+tutorial still moves on.
 
 ## Options and remapping
 

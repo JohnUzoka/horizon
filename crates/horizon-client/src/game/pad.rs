@@ -313,7 +313,11 @@ impl Game<'_> {
         if yaw == 0.0 && pitch == 0.0 {
             return;
         }
-        self.turn_player(f64::from(yaw / 0.15), f64::from(pitch / 0.15));
+        let (xo, yo) = (f64::from(yaw / 0.15), f64::from(pitch / 0.15));
+        // The tutorial's "look around" counts the right stick as it counts the mouse
+        // (`apply_mouse_look`); without it the step never finished on a controller.
+        self.tutorial.mouse(xo, yo);
+        self.turn_player(xo, yo);
     }
 
     /// Vibrate the active pad, when vibration is on and the pad is the one

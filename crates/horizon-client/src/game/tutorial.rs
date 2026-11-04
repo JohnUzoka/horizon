@@ -34,6 +34,14 @@ pub(super) enum Hint {
     CraftPlanks,
 }
 
+impl Hint {
+    /// The hints whose text names keys or the mouse (`tutorial_toast`): "Move with W, A, S, D",
+    /// "Use your mouse to turn", "Hold Left Button to break", "Press E".
+    fn names_keys_or_mouse(self) -> bool {
+        matches!(self, Hint::Move | Hint::Look | Hint::PunchTree | Hint::OpenInventory)
+    }
+}
+
 /// The observations needed on the first tick of each step.
 #[derive(Default)]
 pub(super) struct Previous {
@@ -442,7 +450,14 @@ impl super::Game<'_> {
         batch: &mut horizon_client::hud::HudBatch,
         hidden: bool,
     ) {
-        let wanted = self.tutorial.hint();
+        // A controller player has no keys or mouse to be told about, so those hints don't show
+        // while the pad is in use; on the Switch the controller is the input. The steps still
+        // advance: the left stick counts as moving and the right stick as looking around.
+        let pad = self.pad.in_use || cfg!(target_os = "horizon");
+        let wanted = self
+            .tutorial
+            .hint()
+            .filter(|(hint, _)| !(pad && hint.names_keys_or_mouse()));
         for t in &mut self.tutorial_toasts {
             t.wanted = wanted.is_some_and(|(hint, _)| hint == t.hint);
             if t.wanted {
