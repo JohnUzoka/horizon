@@ -33,7 +33,8 @@ impl Hub {
         }
     }
 
-    /// Send to every placed guest within `range` blocks of `at`.
+    /// Send to every placed guest within `range` blocks of `at`
+    /// (`PlayerList.broadcast`, which leaves out a player exactly at `range`).
     pub fn broadcast_near(&self, at: [f64; 3], range: f64, packet: &C, except: Option<u32>) {
         let body = packet.encode();
         for g in self
@@ -41,8 +42,7 @@ impl Hub {
             .iter()
             .filter(|g| self.here(g) && Some(g.conn) != except)
         {
-            let d: f64 = (0..3).map(|k| (g.position[k] - at[k]).powi(2)).sum();
-            if d <= range * range {
+            if within_range(at, g.position, range) {
                 g.sender.send(body.clone());
             }
         }
@@ -74,6 +74,11 @@ impl Hub {
             seed,
         })
     }
+    /// Draw the next seed from the server sound source.
+    pub fn next_sound_seed(&self) -> i64 {
+        next_sound_seed(&mut *self.sound_seeds.lock().unwrap())
+    }
+
     pub fn sound(
         &self,
         name: &str,
@@ -84,7 +89,7 @@ impl Hub {
         except: Option<u32>,
     ) {
         // Level.playSound: soundSeedGenerator.nextLong per call, not the tick.
-        let seed = next_sound_seed(&mut *self.sound_seeds.lock().unwrap());
+        let seed = self.next_sound_seed();
         let packet = self.sound_packet(name, at, volume, pitch, source, seed);
         self.broadcast_near(at, f64::from(volume.max(1.0)) * 16.0, &packet, except);
     }
@@ -247,6 +252,7 @@ impl Hub {
             menu: kind,
             title,
         }));
+        let mod_type = crate::containers::mod_menu_type(menu_kind);
         g.menu = Some(Menu {
             window,
             kind,
@@ -258,6 +264,7 @@ impl Hub {
             drag: None,
             sent_data: Vec::new(),
             hidden: Vec::new(),
+            mod_type,
         });
         self.send_menu_content(i, items);
     }
@@ -316,6 +323,7 @@ impl Hub {
             drag: None,
             sent_data: Vec::new(),
             hidden: Vec::new(),
+            mod_type: None,
         });
         self.send_menu_content(i, items);
         Some(window)
@@ -524,6 +532,15 @@ impl Hub {
         {
             return Vec::new();
         }
+        // AbstractContainerMenu.isValidSlotIndex: -999 or below the menu's slot
+        // count. A slot past the menu would reach the inventory beyond its 36 slots.
+        let slots = match self.guests[i].menu.as_ref().filter(|_| in_menu) {
+            Some(m) => m.size + 36,
+            None => 46,
+        };
+        if i32::from(p.slot) >= slots as i32 && p.slot != -999 {
+            return Vec::new();
+        }
         let source = self.guests[i].menu.as_ref().map(|m| m.slots);
         let shulker_box = self
             .sync
@@ -593,10 +610,12 @@ impl Hub {
                 .as_mut()
                 .and_then(|items| items.get_mut(slot))
                 .and_then(Option::as_mut),
-            Some((size, _)) => g
+            // setSelectedBundleItemIndex: a slot of the menu only.
+            Some((size, _)) if slot - size < 36 => g
                 .inventory
                 .get_mut(player_slot(slot - size))
                 .and_then(Option::as_mut),
+            Some(_) => None,
             None => match slot {
                 9..=35 => g.inventory.get_mut(slot).and_then(Option::as_mut),
                 36..=44 => g.inventory.get_mut(slot - 36).and_then(Option::as_mut),
@@ -775,23 +794,31 @@ impl Hub {
                 .chain([&c.triggered])
                 .map(|&d| i32::from(d))
                 .collect(),
-            // A mod's menu: the data slots its tick set.
-            Some(BlockEntity::Mod(m)) if !m.data.is_empty() => m.data.clone(),
+            // A mod's menu: the data slots its tick set. A mod menu type's
+            // `ContainerData` has as many as it declares, all sent on open
+            // (`sendInitialData`), 0 where the tick set none.
+            Some(BlockEntity::Mod(e)) if m.mod_type.is_some() || !e.data.is_empty() => {
+                let mut data = e.data.clone();
+                if let Some(t) = m.mod_type {
+                    data.resize(t.data_slots, 0);
+                }
+                data
+            }
             _ => return,
         }
         .into_iter()
         .map(|v| v as i16)
         .collect::<Vec<i16>>();
-        m.sent_data.resize(data.len(), i16::MIN);
+        m.sent_data.resize(data.len(), None);
         let window = m.window;
         let changed: Vec<(usize, i16)> = data
             .iter()
             .enumerate()
-            .filter(|&(k, v)| m.sent_data[k] != *v)
+            .filter(|&(k, v)| m.sent_data[k] != Some(*v))
             .map(|(k, &v)| (k, v))
             .collect();
         for &(k, value) in &changed {
-            m.sent_data[k] = value;
+            m.sent_data[k] = Some(value);
         }
         for (k, value) in changed {
             g.send(&C::ContainerSetData(play::ContainerSetData {
@@ -859,9 +886,16 @@ fn next_sound_seed(g: &mut impl RandomSource) -> i64 {
     g.next_long()
 }
 
+/// `PlayerList.broadcast`'s distance test: the summed squared axis distances
+/// against the squared radius, and a player exactly at the radius is out.
+fn within_range(at: [f64; 3], pos: [f64; 3], range: f64) -> bool {
+    let d: f64 = (0..3).map(|k| (pos[k] - at[k]).powi(2)).sum();
+    d < range * range
+}
+
 #[cfg(test)]
 mod tests {
-    use super::next_sound_seed;
+    use super::{next_sound_seed, within_range};
     use horizon_core::random::LegacyRandom;
 
     #[test]
@@ -879,5 +913,16 @@ mod tests {
         let ticks = 12i64;
         let mut g = LegacyRandom::new(0);
         assert_ne!(next_sound_seed(&mut g), ticks);
+    }
+
+    /// `PlayerList.broadcast` compares the squared distances with `ifge`, so a
+    /// player exactly on the radius gets no packet while one a hair inside does.
+    #[test]
+    fn a_guest_exactly_on_the_radius_hears_nothing() {
+        let at = [10.0, 64.0, -3.0];
+        let at_radius = [at[0] + 16.0, at[1], at[2]];
+        assert!(!within_range(at, at_radius, 16.0));
+        assert!(within_range(at, [at[0] + 15.99, at[1], at[2]], 16.0));
+        assert!(within_range(at, at, 16.0));
     }
 }

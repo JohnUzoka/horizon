@@ -280,7 +280,7 @@ fn merged_water_draws_as_the_quads_it_merged() {
         let vertices = buffer(bytemuck::cast_slice(quads), wgpu::BufferUsages::VERTEX);
         let index_buffer = buffer(bytemuck::cast_slice(&indices), wgpu::BufferUsages::INDEX);
         let instance = buffer(
-            bytemuck::cast_slice(&[super::section_instance(origin, 0)]),
+            bytemuck::cast_slice(&[super::section_instance(origin, 0, 1.0)]),
             wgpu::BufferUsages::VERTEX,
         );
         let target = device.create_texture(&wgpu::TextureDescriptor {

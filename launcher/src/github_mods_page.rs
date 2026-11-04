@@ -32,7 +32,6 @@ pub(super) struct Github {
     message: Option<Result<String, String>>,
     /// The mods installed from GitHub in `home`, and what the last update check found for each.
     home: Option<PathBuf>,
-    origins: Vec<Origin>,
     newer: std::collections::HashMap<String, Resolved>,
     confirm_remove: Option<String>,
     tx: Sender<Event>,
@@ -49,7 +48,6 @@ impl Github {
             stage: Stage::Idle,
             message: None,
             home: None,
-            origins: Vec::new(),
             newer: Default::default(),
             confirm_remove: None,
             tx,
@@ -67,7 +65,6 @@ impl Github {
 
     fn reread(&mut self, home: &Path) {
         self.home = Some(home.to_owned());
-        self.origins = github_mods::origins(home);
     }
 }
 
@@ -87,10 +84,9 @@ fn finish(
         .iter()
         .map(|o| format!("{} {}", o.id, o.version))
         .collect();
-    Ok(format!(
-        "Installed {} from GitHub ({}). Build it from Settings > Native mods.",
-        names.join(", "),
-        found.label()
+    Ok(trf(
+        "Installed {mods} from GitHub ({source}). Build it on the Mods page.",
+        &[("mods", &names.join(", ")), ("source", &found.label())],
     ))
 }
 
@@ -107,11 +103,14 @@ impl Launcher {
                 Event::Resolved(Ok(found), None) => self.github.stage = Stage::Review(found, None),
                 Event::Resolved(Ok(found), Some(id)) => {
                     self.github.stage = Stage::Idle;
-                    let have = self.github.origins.iter().find(|o| o.id == id);
-                    if have.is_some_and(|o| github_mods::is_update(o, &found)) {
+                    let have = github_mods::origin(&self.mods.home(), &id);
+                    if have
+                        .as_ref()
+                        .is_some_and(|o| github_mods::is_update(o, &found))
+                    {
                         self.github.newer.insert(id, found);
                     } else {
-                        self.github.message = Some(Ok(format!("{id} is up to date.")));
+                        self.github.message = Some(Ok(trf("{id} is up to date.", &[("id", &id)])));
                     }
                 }
                 Event::Fetched(found, Ok(mods)) => self.github.stage = Stage::Pick(found, mods),
@@ -124,11 +123,11 @@ impl Launcher {
                     if result.is_ok() {
                         self.github.text.set(String::new());
                         self.github.newer.clear();
-                        // Installing a native mod turns Native mods on, so Settings offers Build.
-                        self.settings.native_mods = true;
+                        // The review above was the trust notice; the Mods page offers Build.
                         self.settings.native_mods_noticed = true;
-                        self.settings.save();
+                        self.save_settings();
                     }
+                    self.instance_mods_changed();
                     self.github.message = Some(result);
                     let home = self.mods.home();
                     self.github.reread(&home);
@@ -144,8 +143,10 @@ impl Launcher {
             return;
         }
         self.github.message = None;
-        self.github.stage =
-            Stage::Working(format!("Asking GitHub about {}/{}…", link.owner, link.repo));
+        self.github.stage = Stage::Working(trf(
+            "Asking GitHub about {owner}/{repo}…",
+            &[("owner", &link.owner), ("repo", &link.repo)],
+        ));
         let tx = self.github.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Event::Resolved(
@@ -164,7 +165,8 @@ impl Launcher {
 
     /// Downloads and checks what the player agreed to; installs it unless there is a choice.
     fn github_install(&mut self, found: Resolved, only: Option<String>) {
-        self.github.stage = Stage::Working(format!("Downloading {}…", found.label()));
+        self.github.stage =
+            Stage::Working(trf("Downloading {source}…", &[("source", &found.label())]));
         let tx = self.github.tx.clone();
         let home = self.mods.home();
         std::thread::spawn(move || {
@@ -186,7 +188,7 @@ impl Launcher {
         let done = finish(&home, &found, &mods, id.as_deref(), id.is_none());
         github_mods::discard(&found);
         let _ = self.github.tx.send(Event::Installed(done));
-        self.github.stage = Stage::Working("Installing…".into());
+        self.github.stage = Stage::Working(tr("Installing…").into());
     }
 
     fn github_field(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -216,13 +218,13 @@ impl Launcher {
                 "https://github.com/owner/repo",
             ))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                window.focus(&this.github.focus);
+                window.focus(&this.github.focus, cx);
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 match line_edit::handle(&mut this.github.text, ev, cx) {
                     Key::Enter => this.github_add(),
-                    Key::Escape => window.blur(),
+                    Key::Escape => window.blur(cx),
                     Key::Pass => return,
                     _ => {}
                 }
@@ -232,7 +234,7 @@ impl Launcher {
         line_edit::mouse(field, cx, |this| &mut this.github.text)
     }
 
-    /// The Add from GitHub panel of the Mods tab, and the mods installed that way.
+    /// The Add from GitHub panel. Installed mods share the main list.
     pub(super) fn github_panel(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let home = self.mods.home();
@@ -253,11 +255,10 @@ impl Launcher {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(caps("Add a native mod from GitHub").text_color(t.muted))
+            .child(caps(tr("Add a native mod from GitHub")).text_color(t.muted))
             .child(
                 text(theme::CAPTION).text_color(t.muted).child(
-                    "A link to a repository (its latest release), a release, a branch or tag, or a commit. \
-                     The launcher installs one exact release file or commit, never a branch that moves.",
+                    tr("A link to a repository (its latest release), a release, a branch or tag, or a commit. The launcher installs one exact release file or commit, never a branch that moves."),
                 ),
             )
             .child(
@@ -291,9 +292,6 @@ impl Launcher {
             Some(Err(e)) => panel = panel.child(notice(e.clone(), &t)),
             None => {}
         }
-        for origin in self.github.origins.clone() {
-            panel = panel.child(self.github_row(&origin, busy, cx));
-        }
         panel
     }
 
@@ -301,12 +299,18 @@ impl Launcher {
     fn github_review(&self, found: &Resolved, only: Option<String>, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let what = match (&found.asset, &found.content_only) {
-            (Some(asset), _) => format!("The release file {} ({}).", asset.name, found.label()),
-            (None, Some(file)) => format!(
-                "The source of {}. Its release ships {file}, a content mod: installing those from GitHub is not supported yet.",
-                found.label()
+            (Some(asset), _) => trf(
+                "The release file {file} ({source}).",
+                &[("file", &asset.name), ("source", &found.label())],
             ),
-            (None, None) => format!("The source at commit {}.", found.commit),
+            (None, Some(file)) => trf(
+                "The source of {source}. Its release ships {file}, a content mod: installing those from GitHub is not supported yet.",
+                &[("source", &found.label()), ("file", file)],
+            ),
+            (None, None) => trf(
+                "The source at commit {commit}.",
+                &[("commit", &found.commit)],
+            ),
         };
         let (url, open) = (found.source_url(), found.source_url());
         let install = found.clone();
@@ -317,10 +321,10 @@ impl Launcher {
             .p(px(16.))
             .text_size(px(theme::UI.px))
             .text_color(t.ink)
-            .child(caps("Not reviewed by the Horizon registry").text_color(t.danger))
+            .child(caps(tr("Not reviewed by the Horizon registry")).text_color(t.danger))
             .child(what)
             .child(
-                "Native mods run with full access to this computer. Read the source before you install it.",
+                tr("Native mods run with full access to this computer. Read the source before you install it."),
             )
             .child(text(theme::CAPTION).font_family(theme::MONO).text_color(t.ink_soft).child(url))
             .child(
@@ -385,30 +389,35 @@ impl Launcher {
             .p(px(16.))
             .text_size(px(theme::UI.px))
             .text_color(t.ink)
-            .child(format!(
-                "{} holds {} mods. Install which?",
-                found.name(),
-                mods.len()
+            .child(trf(
+                "{name} holds {count} mods. Install which?",
+                &[("name", &found.name()), ("count", &mods.len().to_string())],
             ))
             .child(buttons)
     }
 
-    /// One mod installed from GitHub: where from, check for updates, remove.
-    fn github_row(&self, origin: &Origin, busy: bool, cx: &mut Context<Self>) -> Div {
+    /// GitHub-specific actions, shared by both installed-mod lists.
+    fn github_actions(&self, origin: &Origin, busy: bool, cx: &Context<Self>) -> Div {
         let t = self.theme;
         let id = origin.id.clone();
         let mut right = div().flex().flex_wrap().items_center().gap(px(8.));
-        let known = self.github.newer.get(&id).cloned();
+        let known = self
+            .github
+            .newer
+            .get(&id)
+            .filter(|_| self.github.home.as_deref() == Some(self.mods.home().as_path()))
+            .cloned();
         let main = match &known {
             Some(latest) => {
                 let (latest, only) = (latest.clone(), id.clone());
                 button(
                     SharedString::from(format!("github-update-{id}")),
-                    format!("Update to {}", latest.label()),
+                    trf("Update to {version}", &[("version", &latest.label())]),
                     Kind::Primary,
                     &t,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.go(Page::Mods);
                     this.github.stage = Stage::Review(latest.clone(), Some(only.clone()));
                     cx.notify();
                 }))
@@ -424,6 +433,7 @@ impl Launcher {
                 match busy {
                     true => disabled(check),
                     false => check.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.go(Page::Mods);
                         this.github_resolve(link.clone(), Some(only.clone()));
                         cx.notify();
                     })),
@@ -441,61 +451,98 @@ impl Launcher {
             )
             .on_click(move |_, _, cx| cx.open_url(&url)),
         );
-        let confirming = self.github.confirm_remove.as_deref() == Some(id.as_str());
-        let target = id.clone();
+        right
+    }
+
+    pub(super) fn native_mod_actions(
+        &self,
+        row: &native_status::Installed,
+        busy: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        let t = self.theme;
+        let busy = busy || self.github.busy();
+        let mut right = row.origin.as_ref().map_or_else(
+            || div().flex().items_center().gap(px(8.)),
+            |origin| self.github_actions(origin, busy, cx),
+        );
+        let home = self.mods.home();
+        let on = horizon_launcher::browser::java::is_enabled(&home, &row.id);
+        let id = row.id.clone();
         right = right.child(
-            button(
-                SharedString::from(format!("github-remove-{id}")),
-                if confirming {
-                    "Remove for good"
-                } else {
-                    "Remove"
+            switch(format!("native-switch-{id}"), on, &t).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.mods.message =
+                        horizon_launcher::browser::java::set_enabled(&this.mods.home(), &id, !on)
+                            .err()
+                            .map(Err);
+                    this.instance_mods_changed();
+                    cx.notify();
                 },
-                if confirming {
-                    Kind::Secondary
-                } else {
-                    Kind::Ghost
-                },
-                &t,
-            )
-            .when(confirming, |b| b.text_color(t.danger))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if this.github.confirm_remove.as_ref() == Some(&target) {
+            )),
+        );
+        let confirming = self.github.confirm_remove.as_deref() == Some(&row.file);
+        let row = row.clone();
+        let remove = button(
+            SharedString::from(format!("native-remove-{}", row.file)),
+            if confirming {
+                "Remove for good"
+            } else {
+                "Remove"
+            },
+            Kind::Ghost,
+            &t,
+        )
+        .when(confirming, |b| b.text_color(t.danger));
+        right = right.child(if busy {
+            disabled(remove)
+        } else {
+            remove.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.github.confirm_remove.as_deref() == Some(&row.file) {
                     let home = this.mods.home();
-                    this.github.message = Some(
-                        github_mods::remove(&home, &target).map(|_| format!("Removed {target}.")),
-                    );
+                    let result = if row.origin.is_some() {
+                        github_mods::remove(&home, &row.id).map(|_| ())
+                    } else {
+                        std::fs::remove_file(home.join(&row.file)).map_err(|e| e.to_string())
+                    };
+                    this.mods.message =
+                        Some(result.map(|_| trf("Removed {name}.", &[("name", &row.id)])));
                     this.github.reread(&home);
                     this.github.confirm_remove = None;
+                    this.instance_mods_changed();
                 } else {
-                    this.github.confirm_remove = Some(target.clone());
+                    this.github.confirm_remove = Some(row.file.clone());
                 }
                 cx.notify();
-            })),
+            }))
+        });
+        right
+    }
+
+    pub(super) fn native_mod_row(
+        &self,
+        row: &native_status::Installed,
+        busy: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        let t = self.theme;
+        let source = row.origin.as_ref().map_or_else(
+            || trf("Local file · {file}", &[("file", &row.file)]),
+            |o| trf("from GitHub: {source}", &[("source", &o.label())]),
         );
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .child(
+        slot_row(
+            Some(blocks::slot(None, &row.id, 40., &t)),
+            row.id.clone(),
+            Some(
                 div()
                     .flex()
                     .flex_col()
-                    .child(format!("{} {}", origin.id, origin.version))
-                    .child(
-                        text(theme::CAPTION)
-                            .text_color(t.ink_soft)
-                            .child(format!("from GitHub: {}", origin.label())),
-                    )
-                    .child(
-                        text(theme::CAPTION)
-                            .font_family(theme::MONO)
-                            .text_color(t.muted)
-                            .child(format!("sha256 {}", origin.sha256)),
-                    ),
-            )
-            .child(right)
+                    .child(row.version.clone())
+                    .child(source)
+                    .into_any_element(),
+            ),
+            Some(self.native_mod_actions(row, busy, cx).into_any_element()),
+            &t,
+        )
     }
 }

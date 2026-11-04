@@ -68,6 +68,14 @@ def scenarios():
     add('skeleton_day_burn', 120, ['mob minecraft:skeleton 0.5 -60 0.5 0 32 persistent'])
     # NoAI only skips serverAiStep: Mob.aiStep's burnUndead still sets a NoAI zombie alight (#3430).
     add('zombie_noai_day_burn', 120, ['mob minecraft:zombie 0.5 -60 0.5 0 33 persistent noai'])
+    # AgeableMob.aiStep runs with NoAI, including both signs and age-lock controls.
+    for species in ('pig', 'cow', 'horse', 'turtle'):
+        for age in (-2, 2):
+            for noai in (False, True):
+                for locked in (False, True):
+                    flags = (' noai' if noai else '') + (' agelocked' if locked else '')
+                    add(f'{species}_age_{age}_noai_{noai}_locked_{locked}', 4,
+                        [f'mob minecraft:{species} 0.5 -60 0.5 0 34 persistent age={age}{flags}'])
     # The wither (summoned, not built: no invulnerable spawn phase).
     add('wither_player', 200, ['player 10.5 -60 0.5', 'mob minecraft:wither 0.5 -58 0.5 0 41 persistent'])
     # A villager with a job site, a bed and a bell.
@@ -89,6 +97,16 @@ def scenarios():
     for i, (x, seed) in enumerate([(0.5, 240), (6.5, 241)]):
         add(f'iron_golem_village_{i}', 400, VILLAGE + [f'mob minecraft:iron_golem {x} -60 3.5 0 {seed} persistent'], 'difficulty=0')
     add('iron_golem_outside_village', 400, VILLAGE + ['mob minecraft:iron_golem 30.5 -60 3.5 0 242 persistent'], 'difficulty=0')
+    # RandomStandGoal (rearing, with the ambient sound) of every equine, left alone for 800 ticks.
+    for i, species in enumerate(['horse', 'donkey', 'mule', 'zombie_horse', 'skeleton_horse', 'llama']):
+        # The zombie horse at night: by day it burns, and a burning horse's hurts are another matter.
+        add(f'{species}_rears_alone', 800, [f'mob minecraft:{species} 0.5 -60 0.5 0 {260 + i} persistent'],
+            'difficulty=0' + (' time=18000' if species == 'zombie_horse' else ''))
+    # Enough of them for the one in 400 draw to land a few times (the rearing and its sound).
+    for i, species in enumerate(['horse', 'donkey', 'mule', 'zombie_horse', 'skeleton_horse']):
+        add(f'{species}_herd_rears', 1200, [f'mob minecraft:{species} {-10.5 + 3 * k} -60 {-3.5 + 7 * (k % 2)} 0 {300 + 10 * i + k} persistent'
+                                            for k in range(8)], 'difficulty=0' + (' time=18000' if species == 'zombie_horse' else ''))
+    add('baby_horse_rears_alone', 800, ['mob minecraft:horse 0.5 -60 0.5 0 270 persistent baby'], 'difficulty=0')
     # The warden: idle, sniffing out a player, roaring and fighting (WardenAi).
     # Without finalizeSpawn's dig cooldown a warden digs straight back down. warden_player
     # and warden_cow stop before the first blow kills the player or the cow (the probe has no dying
@@ -324,12 +342,23 @@ def scenarios():
                                        f'mob minecraft:dolphin {dx} -63 0.5 0 {seed} persistent'], 'difficulty=0')
     add('dolphin_boat_far', 160, ['fill -40 -64 -40 40 -61 40 minecraft:water', 'player -20.5 -61 0.5 boat=0.1,0',
                                   'mob minecraft:dolphin 20.5 -63 0.5 0 203 persistent'], 'difficulty=0')
+    # FollowMobGoal: a parrot flies after a mob of another kind within 7 blocks and keeps about 3 away.
+    for i, (cx, seed) in enumerate([(5.5, 190), (3.5, 191), (-6.5, 192)]):
+        add(f'parrot_cow_{i}', 300, [f'mob minecraft:parrot 0.5 -59 0.5 0 {seed} persistent',
+                                      f'mob minecraft:cow {cx} -60 0.5 0 {seed + 10} persistent noai'], 'difficulty=0')
+    add('parrot_cow_far', 200, ['mob minecraft:parrot 0.5 -59 0.5 0 195 persistent',
+                                'mob minecraft:cow 12.5 -60 0.5 0 196 persistent noai'], 'difficulty=0')
     add('parrot_tree', 400, TREE + ['mob minecraft:parrot 0.5 -60 0.5 0 183 persistent'], 'difficulty=0')
     add('parrot_falling', 100, ['mob minecraft:parrot 0.5 -50 0.5 0 184 persistent'], 'difficulty=0')
     # A wolf the player hits (#3185, #2820): any wolf with a target is angry (the angry texture):
     # NeutralMob.updatePersistentAnger in Wolf.aiStep restarts the 20-39 s timer, one random draw,
     # every tick it has one, not once when hurt.
     add('wolf_hurt', 200, ['player 5.5 -60 0.5', 'mob minecraft:wolf 0.5 -60 0.5 0 181 persistent', 'hurt 20 0'])
+    # A tamed wolf its owner hits (#4119): TamableAnimal.canAttack never lets it target its owner,
+    # so HurtByTargetGoal doesn't start and the wolf stays calm; a second wolf of the same owner
+    # isn't called either.
+    add('wolf_owner_hurt', 120, ['player 5.5 -60 0.5', 'mob minecraft:wolf 0.5 -60 0.5 0 185 persistent owned',
+                                 'mob minecraft:wolf 0.5 -60 3.5 0 186 persistent owned', 'hurt 20 0'])
     # A wet wolf (#2885): Wolf.aiStep starts the shake of a wet wolf standing still on the ground,
     # Wolf.tick plays its sound (two draws) the same tick and cancels it again in water or rain.
     add('wolf_shake', 200, ['fill 0 -61 0 0 -61 0 minecraft:water', 'mob minecraft:wolf 0.5 -61 0.5 0 183 persistent'])
@@ -385,6 +414,12 @@ def scenarios():
                                 'mob minecraft:cod 2.5 -62 0.5 0 13 persistent noai'])
     add('axolotl_play_dead', 300, [POOL, 'player 12.5 -60 0.5', 'mob minecraft:axolotl 0.5 -62 0.5 0 28 persistent']
         + [f'hurt {t} 0' for t in range(4, 160, 12)])
+    # Tadpoles (TadpoleAi): swimming about and looking at a player, following frog food, panicking when hit.
+    add('tadpole_idle', 200, [POOL, 'player 3.5 -60 0.5', 'mob minecraft:tadpole 0.5 -62 0.5 0 301 persistent'])
+    add('tadpole_tempted', 200, [POOL, 'player 4.5 -60 0.5 hand=minecraft:slime_ball',
+                                 'mob minecraft:tadpole 0.5 -62 0.5 0 302 persistent'])
+    add('tadpole_panic', 100, [POOL, 'player 12.5 -60 0.5', 'mob minecraft:tadpole 0.5 -62 0.5 0 303 persistent',
+                               'hurt 5 0'])
     # Fish swimming at random (#3631): RandomSwimmingGoal's position search in a sealed pool.
     for species, seed in [('cod', 181), ('salmon', 182), ('tropical_fish', 183)]:
         add(f'{species}_random_swim', 120, [POOL, 'player 12.5 -60 0.5',
@@ -636,7 +671,7 @@ def main():
                                    'dev.horizonlab.parity.VanillaMobAiOracle', inputs, build / 'vanilla.txt', world],
                                   build, 'vanilla', timeout=3600)
     if not args.java_only:
-        command = ['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '--example', 'client_probe']
+        command = ['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client-lib', '--example', 'client_probe']
         target, env = lab.cargo_target(), None
         if args.trace:
             target = lab.LOCAL / 'mob-ai-trace-target'

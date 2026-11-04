@@ -109,10 +109,12 @@ pub(crate) mod ffi {
 
     /// newlib `sys/iosupport.h`: `STD_MAX`, the size of `devoptab_list`.
     pub const STD_MAX: usize = 35;
-    /// newlib `devoptab_t`: 32 pointer-sized fields; the name is the first, `write_r` the fifth.
+    /// newlib `devoptab_t`: 32 pointer-sized fields; the name is the first, `write_r` the fifth,
+    /// `read_r` the sixth.
     pub const DEVOPTAB_WORDS: usize = 32;
     pub const DEVOPTAB_NAME: usize = 0;
     pub const DEVOPTAB_WRITE_R: usize = 4;
+    pub const DEVOPTAB_READ_R: usize = 5;
     pub type WriteR = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char, usize) -> isize;
 
     /// newlib `__handle`: what an fd refers to. `dup2` makes two fds share one.

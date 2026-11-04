@@ -7,6 +7,7 @@
 //!
 //! WORK is a `horizon-port-pack` work folder: `oracle/facts.json` and
 //! `mods/<id>/carry/`. The root is built in `WORK/horizon-root`.
+extern crate horizon_client_lib as horizon_client;
 use horizon_client::{
     Result,
     assets::Assets,
@@ -44,6 +45,26 @@ fn tool(name: &str) -> Option<ItemStack> {
         }
         other => Some(ItemStack::new(&format!("minecraft:{other}"), 1)),
     }
+}
+
+/// An equipment asset's first humanoid layers as files under the root, as worn armour reads them.
+fn equipment_textures(root: &Path, asset: &str) -> Value {
+    let (ns, path) = asset.split_once(':').unwrap_or(("minecraft", asset));
+    let Ok(doc) = fs::read(root.join(format!("assets/{ns}/equipment/{path}.json"))) else {
+        return Value::Null;
+    };
+    let doc: Value = serde_json::from_slice(&doc).unwrap_or_default();
+    let mut out = Map::new();
+    for kind in ["humanoid", "humanoid_leggings"] {
+        if let Some(texture) = doc["layers"][kind][0]["texture"].as_str() {
+            let (tns, tpath) = texture.split_once(':').unwrap_or(("minecraft", texture));
+            let file = root.join(format!(
+                "assets/{tns}/textures/entity/equipment/{kind}/{tpath}.png"
+            ));
+            out.insert(kind.into(), json!(file.exists().then_some(file)));
+        }
+    }
+    Value::Object(out)
 }
 
 fn main() -> Result<()> {
@@ -113,7 +134,7 @@ fn main() -> Result<()> {
                 .collect();
             let descriptor = BlockState {
                 name: name.clone(),
-                properties,
+                properties: properties.into(),
             };
             let Some(id) = registry.id(&descriptor) else {
                 states.insert(key.clone(), Value::Null);
@@ -226,6 +247,7 @@ fn main() -> Result<()> {
                         "repairable": repairable,
                         "equip_slot": i.equip_slot,
                         "equip_asset": i.equip_asset,
+                        "equipment": i.equip_asset.as_deref().map(|a| equipment_textures(&root, a)),
                         "food": i.food.map(|(nutrition, saturation)| json!({"nutrition": nutrition, "saturation": saturation})),
                     })
                 }
@@ -248,13 +270,13 @@ fn main() -> Result<()> {
         let row = match recipe {
             Recipe::Shaped { cells, result, .. } => json!({
                 "result": result.item.as_deref(), "count": result.count,
-                "ingredients": cells.iter().flatten().map(|i| sorted(&i.1)).collect::<Vec<_>>()}),
+                "ingredients": cells.iter().flatten().map(|i| sorted(&i.order)).collect::<Vec<_>>()}),
             Recipe::Shapeless {
                 ingredients,
                 result,
             } => json!({
                 "result": result.item.as_deref(), "count": result.count,
-                "ingredients": ingredients.iter().map(|i| sorted(&i.1)).collect::<Vec<_>>()}),
+                "ingredients": ingredients.iter().map(|i| sorted(&i.order)).collect::<Vec<_>>()}),
             Recipe::Special(_) => json!({"special": true}),
         };
         recipe_rows.insert(name.clone(), row);
@@ -263,14 +285,14 @@ fn main() -> Result<()> {
         recipe_rows.insert(
             c.id.clone(),
             json!({"result": &*c.result.item, "count": c.result.count,
-                "ingredients": [sorted(&c.ingredient.1)]}),
+                "ingredients": [sorted(&c.ingredient.order)]}),
         );
     }
     for s in stations.stonecutting.iter().filter(|s| ours(&s.id)) {
         recipe_rows.insert(
             s.id.clone(),
             json!({"result": &*s.result.item, "count": s.result.count,
-                "ingredients": [sorted(&s.input.1)]}),
+                "ingredients": [sorted(&s.input.order)]}),
         );
     }
 

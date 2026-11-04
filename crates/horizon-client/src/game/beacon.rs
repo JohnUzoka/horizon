@@ -130,8 +130,13 @@ impl Game<'_> {
         let Some(BlockEntity::Beacon(mut b)) = self.world.block_entities.take(&key) else {
             return;
         };
+        let previous = b.levels;
         self.tick_beacon(key, &mut b, false);
+        let current = b.levels;
         self.world.block_entities.put(key, BlockEntity::Beacon(b));
+        if (previous == 0) != (current == 0) {
+            self.native_beacon_state_change(self.dim.id(), [key.0, key.1, key.2], current > 0);
+        }
     }
     /// `ClientLevel.tickBlockEntities` for beacons: a server's chunk data
     /// carries no beam sections, so the client builds them too; effects,
@@ -454,6 +459,13 @@ impl Game<'_> {
         let levels = self.beacon_levels();
         let sel = self.station.as_ref().map_or([None; 2], |s| s.beacon);
         let paid = self.station.as_ref().is_some_and(|s| s.inputs[0].is_some());
+        // BeaconScreen draws no title, but has the menu's.
+        super::screen_info::name_container(|| {
+            self.remote_menu_title().map_or_else(
+                || self.translate("container.beacon", "Beacon"),
+                |t| t.plain(),
+            )
+        });
         let atlas = &self.gui.atlas;
         batch.fill(
             atlas,
@@ -562,27 +574,23 @@ impl Game<'_> {
             "gui/sprites/container/beacon/cancel",
         );
         let slots: Vec<usize> = (0..36).chain([INPUT]).collect();
+        self.draw_hovered_slot_highlight(batch, false, ox, oy);
         for i in slots {
             let (sx, sy) = self.slot_position(i);
             if let Some(stack) = self.slot_mut(i).clone() {
                 self.draw_item(batch, &stack, ox + sx, oy + sy);
             }
         }
+        self.draw_hovered_slot_highlight(batch, true, ox, oy);
         let mut stack_tip = None;
         if let Some(slot) = self.slot_at(batch, self.cursor.0, self.cursor.1) {
-            let (sx, sy) = self.slot_position(slot);
-            batch.fill(
-                &self.gui.atlas,
-                ox + sx,
-                oy + sy,
-                16.0,
-                16.0,
-                rgba(255, 255, 255, 128),
-            );
             stack_tip = self.slot_mut(slot).clone();
         }
         if self.carried.is_some() {
             self.draw_carried(batch);
+            if let Some(stack) = stack_tip.filter(|s| self.tooltip_with_carried(s)) {
+                self.draw_stack_tooltip(batch, &stack, self.cursor.0, self.cursor.1);
+            }
         } else if let Some(stack) = stack_tip {
             self.draw_stack_tooltip(batch, &stack, self.cursor.0, self.cursor.1);
         } else if let Some(key) = tooltip {
@@ -660,7 +668,12 @@ impl Game<'_> {
             let origin = (glam::DVec3::new(f64::from(k.0), f64::from(k.1), f64::from(k.2))
                 - camera)
                 .as_vec3();
+            let start = out.len();
             horizon_client::block_entity_render::beacon_beam(origin, sections, time, scale, s, out);
+            // HDR output: the beam shines (entity.wgsl fs_hdr_mark).
+            for v in &mut out[start..] {
+                v.layer |= u32::from(horizon_client::mesher::BRIGHT) << 16;
+            }
         }
     }
 }

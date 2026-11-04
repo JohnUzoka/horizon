@@ -69,10 +69,10 @@ impl Builder {
         });
         let (tx, results) = mpsc::channel();
         // Idle priority: decoration only takes time the near chunks, the
-        // ticks and the frame leave, so more cores can share it.
-        let count = thread::available_parallelism()
-            .map_or(1, |n| n.get() / 3)
-            .clamp(1, 12);
+        // ticks and the frame leave, so more cores can share it: a third of
+        // the threads, rounded up (a 4-thread machine's one thread left idle
+        // time while the far trees and structures came in).
+        let count = horizon_threads::worker_count().div_ceil(3).clamp(1, 12);
         let threads = (0..count)
             .map(|_| Self::spawn(terrain.clone(), shared.clone(), tx.clone()))
             .collect();
@@ -91,6 +91,12 @@ impl Builder {
             .name("Far decoration".into())
             .spawn(move || {
                 horizon_threads::idle_current();
+                // A superflat world's far ring is its flat ground (`FlatTerrain::lod_surface`);
+                // a normal overworld rebuilt here would draw hills, oceans and trees.
+                if terrain.is_flat() {
+                    worker.stop.store(true, Ordering::Relaxed);
+                    return;
+                }
                 // Structure pieces have mutable one-shot placement flags. Sharing
                 // gameplay's seeded pipeline would consume its chests/spawners.
                 let generator = match OverworldGenerator::for_dimension(
@@ -376,7 +382,72 @@ fn shade_sky(column: &mut Column, states: &GenBlockStates) {
         }
     }
     shaded.reverse();
-    column.spans = shaded;
+    column.spans = shaded.into();
+}
+
+/// A wide cell's column is one point of the terrain: a cave, an overhang's
+/// lip or the water an aquifer-less sample puts in caves under sea level stood
+/// for the whole cell, a slab hanging over air or a band of water in a cliff
+/// once its neighbours were lower. Under the top solid span the column is
+/// ground: gaps take the span below, buried fluids the ground under them.
+fn fill_under_surface(column: &mut Column, fluid: impl Fn(BlockStateId) -> bool) {
+    let Some(top) = column.spans.iter().rposition(|span| !fluid(span.state)) else {
+        return;
+    };
+    let Some(ground) = column.spans[..=top].iter().find(|span| !fluid(span.state)) else {
+        return;
+    };
+    let mut state = ground.state;
+    let mut filled = Column {
+        surface: column.surface,
+        spans: crate::lod::Spans::with_capacity(column.spans.len()),
+    };
+    for (index, &span) in column.spans.iter().enumerate() {
+        let mut span = span;
+        if index <= top {
+            if fluid(span.state) {
+                span.state = state;
+            } else {
+                state = span.state;
+            }
+            if let Some(below) = filled.spans.last_mut()
+                && below.max < span.min
+            {
+                below.max = span.min;
+            }
+        }
+        filled.push(span);
+    }
+    *column = filled;
+}
+
+/// A whole tile inside visited chunks needs no density work at all. This
+/// used to evaluate the lattice first and throw all of it away in the per-cell
+/// cache check below.
+fn cached_grid(
+    cache: &FxHashMap<(i32, i32), Arc<[Column; 256]>>,
+    x: i32,
+    z: i32,
+    width: i32,
+    side: usize,
+) -> Option<Vec<Column>> {
+    if width > 16 || cache.is_empty() {
+        return None;
+    }
+    let mut columns = Vec::with_capacity(side * side);
+    for dz in 0..side {
+        for dx in 0..side {
+            let (wx, wz) = (x + dx as i32 * width, z + dz as i32 * width);
+            let cached = cache.get(&(wx >> 4, wz >> 4))?;
+            columns.push(Column::reduced(
+                cached,
+                (wx & 15) as usize,
+                (wz & 15) as usize,
+                width as usize,
+            ));
+        }
+    }
+    Some(columns)
 }
 
 pub(super) struct VanillaLodSampler {
@@ -489,6 +560,9 @@ impl LodSampler for VanillaLodSampler {
         self.grid(x, z, width, 1).pop().unwrap_or_default()
     }
     fn grid(&mut self, x: i32, z: i32, width: i32, side: usize) -> Vec<Column> {
+        if let Some(columns) = cached_grid(&self.cache, x, z, width, side) {
+            return columns;
+        }
         let samples =
             match self
                 .worker
@@ -537,7 +611,7 @@ impl VanillaLodSampler {
         let registry = self.generator.generator.data().registry();
         let mut column = Column {
             surface,
-            spans: Vec::new(),
+            spans: crate::lod::Spans::new(),
         };
         for (min, max, state) in spans.into_iter().rev() {
             column.push(Span {
@@ -561,6 +635,10 @@ impl VanillaLodSampler {
         }
         let nether = self.generator.dimension == "minecraft:the_nether";
         let light = if nether { 0 } else { 240 };
+        if width > 1 && self.generator.dimension == "minecraft:overworld" {
+            let states = self.generator.generator.data().block_states();
+            fill_under_surface(&mut column, |state| states.get(state).has_fluid());
+        }
         self.vegetation.apply(&mut column, x, z, width, light);
         self.islands.apply(&mut column, x, z, width, light);
         if !nether {
@@ -572,6 +650,39 @@ impl VanillaLodSampler {
 
 #[cfg(test)]
 mod tests {
+    /// The all-cached path must return exactly the per-cell reductions the
+    /// old override produced, including negative chunk coordinates.
+    #[test]
+    fn cached_grid_equals_each_cells_reduction() {
+        let mut cache: FxHashMap<(i32, i32), Arc<[Column; 256]>> = FxHashMap::default();
+        let columns: Arc<[Column; 256]> = Arc::new(std::array::from_fn(|i| {
+            Column::from_surface(Some(Surface {
+                height: 60 + i as i32 % 8,
+                state: BlockStateId(i as u32 % 3 + 1),
+                water: None,
+                biome: 0,
+            }))
+        }));
+        cache.insert((0, 0), columns.clone());
+        cache.insert((-1, -1), columns.clone());
+        for (x, z) in [(0, 0), (4, 4), (8, 8), (-8, -8), (-16, -16)] {
+            let fast = cached_grid(&cache, x, z, 4, 2)
+                .unwrap_or_else(|| panic!("inside cached chunks at {x},{z}"));
+            for dz in 0..2 {
+                for dx in 0..2 {
+                    let (wx, wz) = (x + dx * 4, z + dz * 4);
+                    assert_eq!(
+                        fast[dz as usize * 2 + dx as usize],
+                        Column::reduced(&columns, (wx & 15) as usize, (wz & 15) as usize, 4)
+                    );
+                }
+            }
+        }
+        // One missing chunk falls back to the generator path.
+        assert!(cached_grid(&cache, 12, 0, 4, 2).is_none());
+        assert!(cached_grid(&cache, 0, 0, 32, 2).is_none());
+    }
+
     use super::*;
     #[test]
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]

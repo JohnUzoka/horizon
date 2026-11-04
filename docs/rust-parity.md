@@ -1,7 +1,7 @@
 # Horizon Rust rewrite status
 
 The behavior target is the repository's pinned **Minecraft Java Edition 26.3**.
-One-to-one vanilla gameplay parity is the acceptance criterion. It has **not**
+One-to-one parity with vanilla gameplay is the acceptance criterion. It has **not**
 been reached, but the Rust game is now playable: the [native client](native-client.md)
 has a title screen and world management. It generates vanilla terrain with
 decoration and streams, lights and renders it. Survival play works: mining,
@@ -247,7 +247,9 @@ structure stages remain pending.
 
 The [structure-density sampler](structure-density.md) matches **1,360,095 output
 lines per reference JAR**, including ordered rigid-piece/junction contributions
-and scalar/bulk clipping. Live structure discovery and placement remain pending.
+and scalar/bulk clipping. Live placement of a start in a running level is ported
+(`/place structure`, through `StructureStart.placeInChunk`); structure discovery
+during chunk generation is compared by the structure-layout suite.
 
 The [vertical-anchor suite](vertical-anchors.md) matches **181,632 output lines per
 reference JAR**, including four anchor codecs, runtime overflow, nested exclusive

@@ -566,6 +566,120 @@ pub mod horizon_stubs {
         rc
     }
 
+    unsafe extern "C" {
+        /// libnx's `fsFileRead`: `read_size` bytes of `f` from `off`, which it takes as given.
+        fn fsFileRead(
+            f: *mut c_void,
+            off: i64,
+            buf: *mut c_void,
+            read_size: u64,
+            option: u32,
+            bytes_read: *mut u64,
+        ) -> u32;
+        /// newlib's `GetDeviceOpTab`: the device a name such as `sdmc:` names.
+        fn GetDeviceOpTab(name: *const c_char) -> *const usize;
+    }
+
+    /// newlib's `ESPIPE`.
+    const ESPIPE: c_int = 29;
+    /// The kernel's 2001-0106 (`InvalidCurrentMemory`): the file system service can't map the
+    /// buffer (a thread's stack, say). libnx's `fsdev_read` then reads through a buffer of its
+    /// own (`fsdev_read_safe`), and so does `pread`.
+    const INVALID_CURRENT_MEMORY: u32 = 0xD401;
+
+    /// POSIX `pread`, which newlib has none of: std's `FileExt::read_at` calls it, and upstream
+    /// reads files that way (`horizon_core::prepared_files`, since the 2026-11-03 merge). The
+    /// read starts at `offset` and leaves the descriptor's own offset alone, so threads sharing a
+    /// file each read their part: on a file of libnx's fs device (the SD card) it goes straight to
+    /// `fsFileRead`, which takes the offset; anything else has no offset to read at (`ESPIPE`).
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn pread(fd: c_int, buf: *mut c_void, len: usize, offset: i64) -> isize {
+        let Some(file) = (unsafe { fs_file(fd) }) else {
+            unsafe { *__errno() = ESPIPE };
+            return -1;
+        };
+        if offset < 0 {
+            unsafe { *__errno() = EINVAL };
+            return -1;
+        }
+        let mut read = 0;
+        match unsafe { fsFileRead(file, offset, buf, len as u64, 0, &mut read) } {
+            0 => read.min(len as u64) as isize,
+            INVALID_CURRENT_MEMORY => unsafe { pread_through_heap(file, buf.cast(), len, offset) },
+            _ => {
+                unsafe { *__errno() = EIO };
+                -1
+            }
+        }
+    }
+
+    /// The `FsFile` behind `fd` when libnx's fs device opened it: the device's `read_r` is the SD
+    /// card's (every mount of that device shares it), and its file struct (`fsdev_file_t`) starts
+    /// with the `FsFile`.
+    unsafe fn fs_file(fd: c_int) -> Option<*mut c_void> {
+        let handle = unsafe { ffi::__get_handle(fd) };
+        if handle.is_null() {
+            return None;
+        }
+        let device = unsafe { (*handle).device } as usize;
+        if device >= ffi::STD_MAX {
+            return None;
+        }
+        let table = unsafe {
+            (&raw const ffi::devoptab_list)
+                .cast::<*const usize>()
+                .add(device)
+                .read()
+        };
+        let sdmc = unsafe { GetDeviceOpTab(c"sdmc:".as_ptr()) };
+        if table.is_null() || sdmc.is_null() {
+            return None;
+        }
+        let read_r = unsafe { table.add(ffi::DEVOPTAB_READ_R).read() };
+        (read_r != 0 && read_r == unsafe { sdmc.add(ffi::DEVOPTAB_READ_R).read() })
+            .then(|| unsafe { (*handle).file_struct })
+    }
+
+    /// `pread` through a heap buffer, 64 KiB at a time, for a buffer the service can't map.
+    unsafe fn pread_through_heap(
+        file: *mut c_void,
+        buf: *mut u8,
+        len: usize,
+        offset: i64,
+    ) -> isize {
+        let mut bounce = vec![0u8; len.min(64 << 10)];
+        let mut done = 0;
+        while done < len {
+            let want = (len - done).min(bounce.len());
+            let at = offset + done as i64;
+            let mut read = 0;
+            let rc = unsafe {
+                fsFileRead(
+                    file,
+                    at,
+                    bounce.as_mut_ptr().cast(),
+                    want as u64,
+                    0,
+                    &mut read,
+                )
+            };
+            if rc != 0 {
+                if done == 0 {
+                    unsafe { *__errno() = EIO };
+                    return -1;
+                }
+                break;
+            }
+            let read = (read as usize).min(want);
+            unsafe { core::ptr::copy_nonoverlapping(bounce.as_ptr(), buf.add(done), read) };
+            done += read;
+            if read < want {
+                break;
+            }
+        }
+        done as isize
+    }
+
     /// libnx `ThreadFunc`.
     type ThreadFunc = unsafe extern "C" fn(arg: *mut c_void);
 

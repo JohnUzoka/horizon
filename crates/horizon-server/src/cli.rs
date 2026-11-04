@@ -19,8 +19,15 @@ fn running(dir: &Path) -> Result<Client, String> {
 
 /// `start`: `run` in the background, its output in logs/supervisor.log; returns once the game is up.
 pub fn start(dir: &Path) -> Result<(), String> {
-    if Client::open(dir)?.is_some() {
-        return Err(format!("a server is already running in {}", dir.display()));
+    if let Some(client) = Client::open(dir)? {
+        let status = client.call("GET", "/api/v1/status", None)?;
+        if status["phase"] != "stopped" {
+            return Err(format!("a server is already running in {}", dir.display()));
+        }
+        client.call("POST", "/api/v1/start", None)?;
+        wait_running(&client, None)?;
+        println!("The server is running.");
+        return Ok(());
     }
     crate::config::Config::load(dir)?;
     // Left by a supervisor that was killed: the new one writes its own.
@@ -122,7 +129,7 @@ fn wait_running(client: &Client, replaced: Option<u64>) -> Result<(), String> {
         if status["phase"] == "running" && status["engine_pid"].as_u64() != replaced {
             return Ok(());
         }
-        if status["phase"] == "stopped" || status["phase"] == "stopping" {
+        if status["phase"] == "stopping" || (status["phase"] == "stopped" && replaced.is_some()) {
             return Err("the server is stopping".into());
         }
         if Instant::now() > deadline {
@@ -152,6 +159,119 @@ pub fn command(dir: &Path, words: &[String]) -> Result<(), String> {
         "/api/v1/command",
         Some(&json!({ "line": words.join(" ") })),
     )?;
+    for line in reply["output"].as_array().into_iter().flatten() {
+        println!("{}", line.as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// `players [--json]`: who is online, the operators, the whitelist and the bans; a stopped server's lists
+/// are read from its files.
+pub fn players(dir: &Path, as_json: bool) -> Result<(), String> {
+    let v = match Client::open(dir)? {
+        Some(client) => client.call("GET", "/api/v1/players", None)?,
+        None => serde_json::from_str(
+            &crate::admin::players(&crate::api::Shared::with_install(dir, None)).body,
+        )
+        .map_err(|e| e.to_string())?,
+    };
+    if as_json {
+        println!("{v}");
+        return Ok(());
+    }
+    let list = |key: &str, describe: &dyn Fn(&Value) -> String| -> String {
+        let items: Vec<String> = v[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(describe)
+            .collect();
+        if items.is_empty() {
+            "none".into()
+        } else {
+            items.join(", ")
+        }
+    };
+    let name = |p: &Value| p["name"].as_str().unwrap_or_default().to_owned();
+    let because = |b: &Value| match b["reason"].as_str() {
+        Some(reason) => format!(" ({reason})"),
+        None => String::new(),
+    };
+    let online = list("online", &|p| match p["op_level"].as_i64() {
+        Some(level) if level > 0 => format!("{} (op {level}, {} ms)", name(p), p["ping_ms"]),
+        _ => format!("{} ({} ms)", name(p), p["ping_ms"]),
+    });
+    match v["max_players"].as_u64() {
+        Some(max) => println!(
+            "Online ({}/{max}): {online}",
+            v["online"].as_array().map_or(0, Vec::len)
+        ),
+        None => println!("Online: the game isn't running"),
+    }
+    println!(
+        "Operators: {}",
+        list("ops", &|o| format!("{} ({})", name(o), o["level"]))
+    );
+    let white: Vec<String> = v["whitelist"]["players"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(name)
+        .collect();
+    println!(
+        "Whitelist ({}): {}",
+        if v["whitelist"]["enabled"] == true {
+            "on"
+        } else {
+            "off"
+        },
+        if white.is_empty() {
+            "none".into()
+        } else {
+            white.join(", ")
+        }
+    );
+    println!(
+        "Banned: {}",
+        list("bans", &|b| format!("{}{}", name(b), because(b)))
+    );
+    println!(
+        "Banned addresses: {}",
+        list("ip_bans", &|b| format!(
+            "{}{}",
+            b["ip"].as_str().unwrap_or_default(),
+            because(b)
+        ))
+    );
+    Ok(())
+}
+
+/// `kick NAME [REASON]`, `ban NAME [REASON]`, `pardon NAME`, `ban-ip ADDRESS|NAME [REASON]`, `pardon-ip
+/// ADDRESS`: the vanilla command on the running server, through the control API.
+pub fn moderate(dir: &Path, command: &str, words: &[String]) -> Result<(), String> {
+    let Some(target) = words.first() else {
+        return Err(format!(
+            "{command} needs a player's name{}",
+            if command.ends_with("-ip") {
+                " or an address"
+            } else {
+                ""
+            }
+        ));
+    };
+    let mut body = json!({});
+    let key = if target.parse::<std::net::IpAddr>().is_ok() {
+        "ip"
+    } else {
+        "name"
+    };
+    body[key] = json!(target);
+    if words.len() > 1 {
+        body["reason"] = json!(words[1..].join(" "));
+    }
+    let client = running(dir)?;
+    wait_running(&client, None)?;
+    let reply = client.call("POST", &format!("/api/v1/players/{command}"), Some(&body))?;
     for line in reply["output"].as_array().into_iter().flatten() {
         println!("{}", line.as_str().unwrap_or_default());
     }
@@ -402,15 +522,23 @@ fn size(bytes: u64) -> String {
 }
 
 /// `restore NAME [--yes]`: the backup's world in place of the current one (moved aside, not deleted). A
-/// running server restarts with it.
-pub fn restore(dir: &Path, name: &str, yes: bool) -> Result<(), String> {
+/// running server restarts with it. With a dimension, only that one comes back and the rest of the world stays.
+pub fn restore(dir: &Path, name: &str, dimension: Option<&str>, yes: bool) -> Result<(), String> {
     let name = backup::find(dir, name)?;
+    let dimension = dimension
+        .map(backup::dimension_folder)
+        .transpose()?
+        .map(|d| d.0);
+    let what = match &dimension {
+        Some(d) => format!("the dimension {d} with {name}'s"),
+        None => format!("the world with {name}"),
+    };
     if !yes {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             return Err("restore replaces the world: pass --yes to confirm".into());
         }
         print!(
-            "Replace the world with {name}? The current world is kept in {}/. [y/N] ",
+            "Replace {what}? What it replaces is kept in {}/. [y/N] ",
             backup::DIR
         );
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -423,7 +551,11 @@ pub fn restore(dir: &Path, name: &str, yes: bool) -> Result<(), String> {
     }
     if let Some(client) = Client::open(dir)? {
         let before = client.call("GET", "/api/v1/status", None)?["engine_pid"].as_u64();
-        client.call("POST", "/api/v1/restore", Some(&json!({ "name": name })))?;
+        client.call(
+            "POST",
+            "/api/v1/restore",
+            Some(&json!({ "name": name, "dimension": dimension })),
+        )?;
         print!("Restoring {name}: restarting the game with it");
         wait_running(&client, before)?;
         println!(
@@ -433,7 +565,11 @@ pub fn restore(dir: &Path, name: &str, yes: bool) -> Result<(), String> {
     }
     let _lock = supervisor::lock(dir)?;
     let config = crate::config::Config::load(dir)?;
-    match backup::restore(dir, &config, &name)? {
+    let done = match &dimension {
+        Some(d) => backup::restore_dimension(dir, &config, &name, d)?,
+        None => backup::restore(dir, &config, &name)?,
+    };
+    match done {
         Some(old) => println!(
             "Restored {name}; the world it replaced is in {}",
             old.display()
