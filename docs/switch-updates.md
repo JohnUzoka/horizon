@@ -81,10 +81,12 @@ The port's workshop (`horizon-port/scripts/hx-release.sh BUILD`) does the build:
    and keeps the ELF as `~/nro-elf/horizon-client-switch-BUILD`.
 4. It adds `horizon-switch-BUILD.zip` for a first install: `switch/horizon/horizon.nro` plus the
    `client.txt` without which the NRO runs a dedicated server.
+5. It tags the commit it built `switch-BUILD` and pushes the tag. The tag stays on that commit,
+   which is `release.json`'s revision, even when the branch moves on.
 
 Write the release notes beside them (`RELEASE-NOTES.md`). Publish the four files as a GitHub release
-tagged `switch-BUILD`, targeting the `switch` branch, with the notes as its description. It must not
-be a pre-release. The script prints the steps and the equivalent `gh release create` command.
+on the existing tag `switch-BUILD`, with the notes as its description. It must not be a
+pre-release. The script prints the steps and the equivalent `gh release create` command.
 
 A development build counts as build 0, so build 1 can already be tested: a Switch running a
 development build offers build 1, installs it, and its next launch says it was updated and names
