@@ -20163,6 +20163,10 @@ fn load_resources(
     // in either starts both again with the game's own resources
     // (Minecraft.rollbackResourcePacks).
     let parallel = threads > 1;
+    // The Switch loads the menu bundle first and alone, then the core tables (with their own
+    // threads): on its three cores and one SD card, the bundle loading beside the core's ten or
+    // so threads reached the title 74 s after the loading screen instead of 15 (run 41 / run 40).
+    let core_alongside = parallel && !cfg!(target_os = "horizon");
     let mut offer = |ui: UiResources, root: &std::path::Path| {
         if menu {
             log::info!(
@@ -20177,7 +20181,7 @@ fn load_resources(
     };
     let (core, loaded_gui) = loop {
         let (ui, core) = std::thread::scope(|scope| {
-            let core = Step::spawn(scope, parallel, || {
+            let core = Step::spawn(scope, core_alongside, || {
                 // A failed pack starts core again from the game's own
                 // resources, which the world's preload must read: with packs
                 // it waits for the core that loaded.
